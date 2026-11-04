@@ -235,6 +235,15 @@ const redirectError = adminAuth.findSavedSecretRedirect(body, saved, GPT_API_SEC
 if (redirectError) return res.status(400).json({ success: false, message: redirectError });
 ```
 
+## Pricing Page Plus Button Compatibility
+
+- `pricing-checkout.js` must recognize the observed `Plus` / `ChatGPT Plus` card with a `Start now` button as a Personal plan view.
+- Never add a page-wide `Start now` fallback: Free, Pro, Business, and unrelated calls to action may share the label.
+- Locate the visible exact Plus title, use its nearest div/section/article ancestor containing a button, and reject containers containing another plan title or multiple matching buttons. The action must be visible and enabled.
+- Keep the existing Upgrade/Get Plus/Subscribe paths and Pro selection behavior unchanged. This UI compatibility fix does not address Checkout HTTP 400 unusual-activity responses.
+- `test/pricing-checkout.test.js` uses real local Chromium with offline HTML fixtures; all external requests are aborted and asserted absent. Keep coverage for competing plans, Personal view detection, legacy labels, hidden/disabled/ambiguous controls, and Pro selection.
+- Browser tests require the project's Playwright Chromium installation; do not run real Checkout or payment tasks for this regression.
+
 ## Testing Requirements
 
 - `test/admin-auth.test.js` must keep proving that a token signed with the legacy cwd-derived secret fails `verifyAdminToken`, with and without `ADMIN_TOKEN_SECRET`.

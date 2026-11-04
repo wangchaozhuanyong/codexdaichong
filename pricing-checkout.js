@@ -62,6 +62,27 @@ function matchesCountryLabel(text, labels) {
     return labels.some((label) => normalized === String(label).toLowerCase());
 }
 
+async function findPlusStartNowButton(page) {
+    const titles = page.getByText(/^(?:ChatGPT\s+)?Plus$/i);
+    for (let index = 0; index < await titles.count(); index++) {
+        const title = titles.nth(index);
+        if (!(await title.isVisible().catch(() => false))) continue;
+
+        // Start now is shared by multiple plans; stay in the nearest plan card.
+        const card = title.locator('xpath=ancestor::*[self::div or self::section or self::article][.//button][1]');
+        const otherPlans = card.getByText(/^(?:ChatGPT\s+)?(?:Free|Go|Pro|Business|Team|Enterprise)$/i);
+        if (await otherPlans.count()) continue;
+
+        const button = card.getByRole('button', { name: /^Start now$/i });
+        if (await button.count() !== 1) continue;
+        if (await button.isVisible().catch(() => false)
+            && await button.isEnabled().catch(() => false)) {
+            return button;
+        }
+    }
+    return null;
+}
+
 async function isBusinessTabActive(page) {
     const businessTab = page.getByRole('tab', { name: /^Business$/i }).first();
     if (await businessTab.isVisible({ timeout: 800 }).catch(() => false)) {
@@ -80,6 +101,10 @@ async function isBusinessTabActive(page) {
 async function isPersonalPlanView(page) {
     if (await isBusinessTabActive(page)) {
         return false;
+    }
+
+    if (await findPlusStartNowButton(page)) {
+        return true;
     }
 
     const plusCard = await page.locator('[role="dialog"]').locator('div').filter({
@@ -644,6 +669,16 @@ async function clickPlanUpgrade(page, planType) {
     await assertChatGptLoggedIn(page, '升级前');
     await switchToPersonalPlans(page);
     await page.waitForTimeout(1000);
+
+    if (plan === 'plus') {
+        const startNow = await findPlusStartNowButton(page);
+        if (startNow) {
+            await startNow.scrollIntoViewIfNeeded().catch(() => {});
+            await startNow.click({ timeout: 10000 });
+            console.log('✅ [步骤] 已点击 Plus 卡片 Start now 按钮');
+            return;
+        }
+    }
 
     for (const pattern of patterns) {
         try {
