@@ -244,6 +244,15 @@ if (redirectError) return res.status(400).json({ success: false, message: redire
 - `test/pricing-checkout.test.js` uses real local Chromium with offline HTML fixtures; all external requests are aborted and asserted absent. Keep coverage for competing plans, Personal view detection, legacy labels, hidden/disabled/ambiguous controls, and Pro selection.
 - Browser tests require the project's Playwright Chromium installation; do not run real Checkout or payment tasks for this regression.
 
+## No-Payment Checkout Debug Contract
+
+- `CHECKOUT_DEBUG_ONLY=1` permits API creation and the existing pricing UI fallback, but must return before `executePaymentWithRetry`, card allocation, billing, form filling, and payment submission.
+- API link creation alone is not debug completion. `verifyCheckoutDebugPage` must open the link, reject unrelated/login redirects, and passively observe a visible card-number input in the page or an iframe. Headings, URLs, hidden inputs, and Subscribe buttons alone are insufficient.
+- The passive debug verifier must not click CAPTCHA challenges, fill fields, or submit forms. Failure remains a terminal failed debug task with screenshots/logs, no automatic retry and no card/phone deletion flags.
+- Emit `SUCCESS_SCREENSHOT`, `CHECKOUT_URL`, `CHECKOUT_PAGE_READY`, then `CHECKOUT_DEBUG_SUCCESS` only after the form is visible and the screenshot is saved. Keep the existing failure screenshot handling.
+- Admin status exposes `checkout_page_ready`; describe new success as a loaded payment page with no payment and label media as debug screenshots. Legacy link-only records must not claim the page was opened.
+- `test/checkout-debug.test.js` exercises the real worker phase with synthetic dependencies and the real pricing/button/form flow with all browser responses fulfilled locally. Debug cases must never reach the payment spy; formal cases preserve their existing payment calls. No live Sessions or payment requests are used.
+
 ## Testing Requirements
 
 - `test/admin-auth.test.js` must keep proving that a token signed with the legacy cwd-derived secret fails `verifyAdminToken`, with and without `ADMIN_TOKEN_SECRET`.

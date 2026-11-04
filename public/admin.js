@@ -4745,7 +4745,9 @@
             }
             if (statusEl) {
                 if (status === 'success') {
-                    statusEl.textContent = '✅ 支付链接已生成';
+                    statusEl.textContent = data.checkout_page_ready
+                        ? '✅ 支付页面已打开，调试已停止（未填卡、未付款）'
+                        : '✅ 支付链接已生成';
                     statusEl.style.color = 'var(--success, #22c55e)';
                 } else if (status === 'running') {
                     statusEl.textContent = '⏳ 浏览器调试进行中...';
@@ -4766,7 +4768,7 @@
             if (shotWrap) {
                 const shots = Array.isArray(data.screenshots) ? data.screenshots : [];
                 if (shots.length) {
-                    shotWrap.innerHTML = `<div style="font-size:13px; margin-bottom:8px; color:var(--text-dim);">失败截图 (${shots.length})</div>`
+                    shotWrap.innerHTML = `<div style="font-size:13px; margin-bottom:8px; color:var(--text-dim);">调试截图 (${shots.length})</div>`
                         + shots.map((p) => `<div style="margin-bottom:10px;"><img src="${buildScreenshotUrl(p)}" alt="${escapeHtml(p)}" style="max-width:100%; border-radius:8px; border:1px solid var(--divider);"></div>`).join('');
                 } else {
                     shotWrap.innerHTML = '';

@@ -1,7 +1,7 @@
 const { executePaymentWithRetry } = require('./payment-retry');
 const { requireReadablePlanType } = require('./plan-registry');
 const { openPricingCheckout } = require('./pricing-checkout');
-const { openApiCheckout } = require('./chatgpt');
+const { openApiCheckout, verifyCheckoutDebugPage } = require('./chatgpt');
 const store = require('./mysql-store');
 const { getRegionConfig, getRegionBrowserProfile } = require('./region-config');
 const { installChatGptSession, bootstrapChatGptSession } = require('./session-auth');
@@ -482,7 +482,7 @@ async function run() {
         // --- Phase 1: Resolve payment parameters ---
         const debugOnly = process.env.CHECKOUT_DEBUG_ONLY === '1';
         if (debugOnly) {
-            console.log('[调试] 支付链接调试模式：浏览器注入 Session → Checkout API → 输出链接（不执行支付）');
+            console.log('[调试] 支付页面调试：Session 登录 → Checkout API（失败则转网页定价）→ 支付表单 → 截图后停止（不填卡、不付款）');
         } else {
             console.log('[1] 准备自助充值流程...');
         }
@@ -542,10 +542,7 @@ async function run() {
                 checkoutOpened = true;
             } catch (apiError) {
                 console.warn(`[Warn] API Checkout 失败: ${apiError.message}`);
-                if (debugOnly) {
-                    throw apiError;
-                }
-                if (checkoutMode === 'api') {
+                if (checkoutMode === 'api' || debugOnly) {
                     console.log('[Info] 正在回退到 UI 定价页流程...');
                 } else {
                     throw apiError;
@@ -554,9 +551,6 @@ async function run() {
         }
 
         if (!checkoutOpened) {
-            if (debugOnly) {
-                throw new Error('API Checkout 失败，调试模式不启用 UI 定价页');
-            }
             console.log('🧭 [步骤] 正在打开定价页并选择升级套餐...');
             await openPricingCheckout(page, {
                 region: billingCountry,
@@ -566,9 +560,17 @@ async function run() {
         }
 
         if (debugOnly) {
-            const checkoutUrl = checkoutResult?.checkoutUrl || page.url();
+            const verified = await verifyCheckoutDebugPage(page, {
+                checkoutUrl: checkoutResult?.checkoutUrl || page.url(),
+                timeoutMs: Number(process.env.CHECKOUT_READY_WAIT_MS || 60000)
+            });
+            const checkoutUrl = verified.checkoutUrl;
+            const screenshot = await captureDebugScreenshot(context, page, 'ready', '支付页面截图');
+            if (!screenshot) throw new Error('支付页面截图未能保存，调试未完成');
+            console.log(`SUCCESS_SCREENSHOT: ${screenshot}`);
             console.log(`🔗 [调试] 支付链接: ${checkoutUrl}`);
             console.log(`CHECKOUT_URL: ${checkoutUrl}`);
+            console.log('CHECKOUT_PAGE_READY');
             console.log('CHECKOUT_DEBUG_SUCCESS');
             return;
         }

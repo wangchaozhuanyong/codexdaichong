@@ -1060,11 +1060,14 @@ function analyzeCheckoutDebugOutput(output, timedOut) {
 
     if (normalized.includes('CHECKOUT_DEBUG_SUCCESS')) {
         const checkoutUrl = extractCheckoutUrlFromOutput(normalized);
+        const checkoutPageReady = normalized.includes('CHECKOUT_PAGE_READY');
         return {
             status: 'success',
-            message: checkoutUrl ? `支付链接已生成: ${checkoutUrl}` : '支付链接调试成功',
+            message: checkoutPageReady ? '支付页面已打开，调试已停止（未填卡、未付款）'
+                : (checkoutUrl ? `支付链接已生成: ${checkoutUrl}` : '支付链接调试成功'),
             checkoutUrl,
-            reachedPayment: Boolean(checkoutUrl),
+            checkoutPageReady,
+            reachedPayment: checkoutPageReady,
             shouldRetry: false,
             deletePhone: false,
             deleteCard: false
@@ -1089,7 +1092,14 @@ function analyzeCheckoutDebugOutput(output, timedOut) {
             deleteCard: false
         };
     }
-    return base;
+    return {
+        ...base,
+        status: 'failed',
+        message: runtimeError || base.message || '支付页面调试失败',
+        shouldRetry: false,
+        deletePhone: false,
+        deleteCard: false
+    };
 }
 
 function extractCardLast4FromOutput(output) {
@@ -1527,6 +1537,7 @@ function getCheckoutProgress(output, status = 'running') {
         ['Session 登录成功', 12],
         ['正在通过 API 创建 Checkout', 20],
         ['Checkout 页面已打开', 35],
+        ['CHECKOUT_PAGE_READY', 95],
         ['CHECKOUT_DEBUG_SUCCESS', 100],
         ['CHECKOUT_URL:', 95],
         ['已打开 ChatGPT 定价页', 15],
@@ -3466,6 +3477,7 @@ app.get('/api/admin/checkout/status/:jobKey', async (req, res) => {
             message: task.message,
             progress: Number(task.progress || 0),
             checkout_url: checkoutUrl || null,
+            checkout_page_ready: String(task.raw_output || '').includes('CHECKOUT_PAGE_READY'),
             screenshots,
             videos
         });
@@ -4222,7 +4234,9 @@ function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, p
             const failureScreenshots = extractScreenshotsFromOutput(run.output);
             const finalStatus = analysis.status || 'failed';
             const finalProgress = finalStatus === 'success' ? 100 : Math.min(getCheckoutProgress(run.output, finalStatus), 99);
-            const finalMessage = finalStatus === 'success' && checkoutUrl
+            const finalMessage = finalStatus === 'success' && analysis.checkoutPageReady
+                ? '支付页面已打开，调试已停止（未填卡、未付款）'
+                : finalStatus === 'success' && checkoutUrl
                 ? `支付链接: ${checkoutUrl}`
                 : (analysis.message || '支付链接调试失败');
 

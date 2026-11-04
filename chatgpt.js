@@ -445,10 +445,63 @@ async function openApiCheckout(page, { accessToken, planType, country, currency,
     return { checkoutUrl: currentUrl, sessionId: checkout.sessionId };
 }
 
+/** Passive debug check: observe the card form without filling or submitting it. */
+async function verifyCheckoutDebugPage(page, { checkoutUrl, timeoutMs = 60000 } = {}) {
+    const { assertChatGptLoggedIn } = require('./session-auth');
+    const { hasVisibleLoginChrome } = require('./auth-page-detect');
+    const isPaymentUrl = (raw) => {
+        try {
+            const url = new URL(raw);
+            return url.protocol === 'https:' && (
+                (url.hostname === 'chatgpt.com' && url.pathname.startsWith('/checkout/'))
+                || (['pay.openai.com', 'checkout.stripe.com'].includes(url.hostname)
+                    && url.pathname.startsWith('/c/pay/'))
+            );
+        } catch (_) { return false; }
+    };
+    const target = String(checkoutUrl || page.url());
+    if (!isPaymentUrl(target)) {
+        throw new Error('调试未获得有效的 Checkout 支付页面地址');
+    }
+    if (page.url() !== target) {
+        console.log('🔗 [调试] 正在打开支付链接并检查页面...');
+        await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    }
+
+    console.log('[调试] 正在等待支付表单加载（不填卡、不提交）...');
+    const deadline = Date.now() + Math.max(1000, Math.min(Number(timeoutMs) || 60000, 120000));
+    const cardSelector = [
+        'input[autocomplete="cc-number"]', 'input[name="cardnumber"]', 'input[name="number"]',
+        'input[aria-label*="Card number" i]', 'input[data-elements-stable-field-name="cardNumber"]'
+    ].join(', ');
+    while (Date.now() < deadline) {
+        await assertChatGptLoggedIn(page, '支付页面调试');
+        if (await hasVisibleLoginChrome(page)) {
+            throw new Error('支付页面调试停在登录界面，未加载支付表单');
+        }
+        if (!isPaymentUrl(page.url())) {
+            throw new Error('支付页面发生非 Checkout 跳转，调试已停止');
+        }
+        for (const frame of page.frames()) {
+            const inputs = frame.locator(cardSelector);
+            const count = await inputs.count().catch(() => 0);
+            for (let index = 0; index < count; index++) {
+                if (await inputs.nth(index).isVisible().catch(() => false)) {
+                    console.log('✅ [调试] 支付表单已加载，调试已停止（未填卡、未付款）');
+                    return { checkoutUrl: page.url() };
+                }
+            }
+        }
+        await page.waitForTimeout(500);
+    }
+    throw new Error('Checkout 支付表单未能加载，调试已停止（未填卡、未付款）');
+}
+
 module.exports = ChatGPTService;
 module.exports.ChatGPTService = ChatGPTService;
 module.exports.activateSubscription = activateSubscription;
 module.exports.openApiCheckout = openApiCheckout;
+module.exports.verifyCheckoutDebugPage = verifyCheckoutDebugPage;
 module.exports.createHostedCheckoutLink = createHostedCheckoutLink;
 module.exports.buildCheckoutPayload = buildCheckoutPayload;
 module.exports.formatApiErrorDetail = formatApiErrorDetail;

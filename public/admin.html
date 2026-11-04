@@ -848,7 +848,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         <div id="checkout_debug" class="page-view">
             <div class="page-header">
                 <h1>支付链接调试</h1>
-                <p>启动 Playwright 浏览器，注入 Session 后调用 Checkout API 生成支付链接（不执行填卡/订阅，正式开通请走前台 CDK）</p>
+                <p>启动浏览器并注入 Session；API 失败时转到网页定价流程，支付表单加载后保存截图并停止（不填卡、不付款）</p>
             </div>
 
             <div class="panel">
@@ -918,7 +918,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                         打开完整运行日志
                     </button>
                 </div>
-                <p style="font-size: 12px; color: var(--text-dim); margin: 8px 0 12px;">仅显示当前调试任务的 Playwright 子进程输出；失败时会自动保存截图。</p>
+                <p style="font-size: 12px; color: var(--text-dim); margin: 8px 0 12px;">仅显示当前调试任务的浏览器日志；成功和失败都会保存截图。</p>
                 <div class="runtime-log-pre-wrap">
                     <pre id="checkout_debug_log_pre" class="runtime-log-pre" spellcheck="false"></pre>
                 </div>
@@ -1513,7 +1513,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         </div>
     </main>
 
-    <script src="/admin.js?v=20261102-cf-access"></script>
+    <script src="/admin.js?v=20261104-checkout-debug-page"></script>
 </body>
 
 </html>
