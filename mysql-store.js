@@ -29,7 +29,6 @@ const DB_USER = process.env.DB_USER || 'root';
 const DB_PASSWORD = process.env.DB_PASSWORD || '';
 
 const SCHEMA_PATH = path.join(__dirname, 'mysql-schema.sql');
-const { normalizeLocalCheckoutConfig } = require('./local-checkout');
 const DEFAULT_ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || 'admin@vru.cc').trim().toLowerCase();
 const DEFAULT_ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || 'admin123');
 const DEFAULT_ADMIN_SECONDARY_PASSWORD = String(process.env.ADMIN_SECONDARY_PASSWORD || 'admin123');
@@ -85,19 +84,6 @@ const ASSET_LOCK_STALE_MS = Number(process.env.ASSET_LOCK_STALE_MS || 15 * 60 * 
  */
 function resolvePlanName(planType, overrides = {}) {
     return resolveCheckoutPlanName(planType, overrides);
-}
-
-async function getLocalCheckoutConfig() {
-    const rows = await runQuery('SELECT config_value FROM app_config WHERE config_key = ?', ['local_checkout_config']);
-    const raw = rows[0]?.config_value;
-    return normalizeLocalCheckoutConfig(raw ? JSON.parse(raw) : {});
-}
-
-async function saveLocalCheckoutConfig(input) {
-    const config = normalizeLocalCheckoutConfig(input);
-    await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)
-        ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`, ['local_checkout_config', JSON.stringify(config)]);
-    return config;
 }
 
 function createPasswordHash(password) {
@@ -4605,8 +4591,6 @@ async function listRecentGptApiOrders(limit = 10) {
 }
 
 module.exports = {
-    getLocalCheckoutConfig,
-    saveLocalCheckoutConfig,
     runQuery,
     runExecute,
     ensureReady,

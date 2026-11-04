@@ -4586,7 +4586,6 @@
                 await loadData(true);
                 await loadRegionConfig();
                 await loadGptApiConfig();
-                await loadLocalCheckoutConfig();
                 if (adminDataRefreshTimer) {
                     clearInterval(adminDataRefreshTimer);
                 }
@@ -4790,7 +4789,7 @@
                     const btn = document.getElementById('checkout_generate_btn');
                     if (btn) {
                         btn.disabled = false;
-                        btn.innerHTML = '<i data-lucide="play"></i> 生成支付链接（不付款）';
+                        btn.innerHTML = '<i data-lucide="play"></i> 启动浏览器调试';
                         lucide.createIcons();
                     }
                     if (forceToast) {
@@ -4848,7 +4847,7 @@
             } catch (e) {
                 if (btn) {
                     btn.disabled = false;
-                    btn.innerHTML = '<i data-lucide="play"></i> 生成支付链接（不付款）';
+                    btn.innerHTML = '<i data-lucide="play"></i> 启动浏览器调试';
                     lucide.createIcons();
                 }
                 showMessage(e.message || '启动失败', 'error');
@@ -4877,7 +4876,7 @@
             const current = sel.value || 'plus';
             sel.innerHTML = CANONICAL_PLAN_TYPES.map((key) => {
                 const name = checkoutPlanMap[key];
-                const suffix = name || '网页识别套餐';
+                const suffix = name || '需手动配置 plan_name';
                 return `<option value="${key}">${escapeHtml(PLAN_LABELS[key])} — ${escapeHtml(suffix)}</option>`;
             }).join('');
             sel.value = CANONICAL_PLAN_TYPES.includes(current) ? current : 'plus';
@@ -4890,7 +4889,7 @@
             const mapped = String(checkoutPlanMap[planType] || '');
             if (input) {
                 input.value = mapped;
-                input.placeholder = mapped || '留空时从网页选择目标套餐';
+                input.placeholder = mapped || `${PLAN_LABELS[planType] || planType} 的 plan_name 未配置`;
                 input.dataset.autoValue = mapped;
             }
         }
@@ -5414,40 +5413,6 @@
                 showMessage(e.message || '清空失败', 'error');
             }
             lucide.createIcons();
-        }
-
-        async function loadLocalCheckoutConfig() {
-            try {
-                const response = await authFetch('/api/admin/local-checkout');
-                const data = await response.json();
-                if (!response.ok || !data.success) throw new Error(data.message || '加载本地设置失败');
-                document.getElementById('local_checkout_mode').value = data.config.mode;
-                CANONICAL_PLAN_TYPES.forEach(type => {
-                    document.getElementById(`local_checkout_${type}`).value = data.config.planNames[type] || '';
-                });
-                document.getElementById('local_checkout_hint').textContent = '正式充值与调试共用此设置';
-            } catch (error) {
-                document.getElementById('local_checkout_hint').textContent = error.message;
-            }
-        }
-
-        async function saveLocalCheckoutConfig() {
-            try {
-                const response = await authFetch('/api/admin/local-checkout', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        mode: document.getElementById('local_checkout_mode').value,
-                        planNames: Object.fromEntries(CANONICAL_PLAN_TYPES.map(type => [type,
-                            document.getElementById(`local_checkout_${type}`).value.trim()
-                        ]))
-                    })
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) throw new Error(data.message || '保存失败');
-                document.getElementById('local_checkout_hint').textContent = data.message;
-                showMessage(data.message, 'success');
-                await loadCheckoutPlans();
-            } catch (error) { showMessage(error.message, 'error'); }
         }
 
         bootAdmin();

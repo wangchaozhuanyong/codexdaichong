@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify precise tier behavior and no payment during debug"}
-{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check settings round-trip and frontend syntax"}

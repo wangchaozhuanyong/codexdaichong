@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Preserve canonical tiers, fail closed and retain credential and task boundaries"}
-{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Escape admin values and retain tier-specific settings"}
