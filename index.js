@@ -482,7 +482,7 @@ async function run() {
         // --- Phase 1: Resolve payment parameters ---
         const debugOnly = process.env.CHECKOUT_DEBUG_ONLY === '1';
         if (debugOnly) {
-            console.log('[调试] 支付链接调试模式：浏览器注入 Session → Checkout API → 输出链接（不执行支付）');
+            console.log('[调试] 支付链接调试模式：验证套餐并输出链接（不填卡、不执行支付）');
         } else {
             console.log('[1] 准备自助充值流程...');
         }
@@ -524,12 +524,16 @@ async function run() {
         }
 
         // --- Phase 2: API 创建 Checkout（注入账单地区），失败时回退 UI 定价页 ---
-        const checkoutMode = String(process.env.CHECKOUT_MODE || 'api').toLowerCase();
+        const checkoutMode = String(process.env.CHECKOUT_MODE || 'auto').toLowerCase();
         let checkoutOpened = false;
         let checkoutResult = null;
-        const planNameOverride = String(CONFIG.planNameOverride || '').trim() || undefined;
+        let planNameOverride = String(CONFIG.planNameOverride || '').trim() || undefined;
+        if (!planNameOverride) {
+            try { planNameOverride = store.resolvePlanName(planType); } catch (_) { /* exact UI discovery when unconfigured */ }
+        }
 
-        if (checkoutMode !== 'ui') {
+        if (checkoutMode === 'api' && !planNameOverride) throw new Error(`${planType} 的本地接口套餐标识未配置`);
+        if (checkoutMode !== 'ui' && planNameOverride) {
             try {
                 checkoutResult = await openApiCheckout(page, {
                     accessToken: loginInfo.session?.accessToken || CONFIG.chatgptToken,
@@ -542,21 +546,14 @@ async function run() {
                 checkoutOpened = true;
             } catch (apiError) {
                 console.warn(`[Warn] API Checkout 失败: ${apiError.message}`);
-                if (debugOnly) {
-                    throw apiError;
-                }
                 if (checkoutMode === 'api') {
-                    console.log('[Info] 正在回退到 UI 定价页流程...');
-                } else {
                     throw apiError;
                 }
+                console.log('[Info] 正在回退到 UI 定价页流程...');
             }
         }
 
         if (!checkoutOpened) {
-            if (debugOnly) {
-                throw new Error('API Checkout 失败，调试模式不启用 UI 定价页');
-            }
             console.log('🧭 [步骤] 正在打开定价页并选择升级套餐...');
             await openPricingCheckout(page, {
                 region: billingCountry,

@@ -4,6 +4,7 @@ const { getRegionConfig } = require('./region-config');
 const { assertChatGptLoggedIn } = require('./session-auth');
 const { clearHumanVerification } = require('./human-verification');
 const { requireReadablePlanType } = require('./plan-registry');
+const { selectPricingUpgrade, expandAllPlans } = require('./pricing-plan-selection');
 
 const PRICING_URL = 'https://chatgpt.com/#pricing';
 
@@ -44,14 +45,6 @@ const REGION_CURRENT_COUNTRY_HINTS = {
 
 const SKIP_REGION_BUTTON_TEXT = /^(Upgrade|Personal|Business|Free|Plus|Pro|Subscribe|Close|Your current plan|升级|订阅|关闭)$/i;
 
-const PLAN_UPGRADE_PATTERNS = {
-    plus: [/升级至\s*Plus/i, /Upgrade to Plus/i, /Get Plus/i, /Subscribe to Plus/i, /^Upgrade$/i],
-    pro100: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro200: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro500: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro_5x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro_20x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i]
-};
 
 function normalizeOptionText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
@@ -638,87 +631,10 @@ async function selectPricingRegion(page, regionCode) {
  */
 async function clickPlanUpgrade(page, planType) {
     const plan = requireReadablePlanType(planType, 'plan_type');
-    const patterns = PLAN_UPGRADE_PATTERNS[plan];
-    console.log(`📦 [步骤] 正在点击升级按钮 (套餐: ${plan})...`);
-
+    console.log(`📦 [步骤] 正在选择升级套餐 (套餐: ${plan})...`);
     await assertChatGptLoggedIn(page, '升级前');
     await switchToPersonalPlans(page);
-    await page.waitForTimeout(1000);
-
-    for (const pattern of patterns) {
-        try {
-            const btn = page.getByRole('button', { name: pattern }).first();
-            if (await btn.isVisible({ timeout: 4000 })) {
-                await btn.scrollIntoViewIfNeeded().catch(() => {});
-                await btn.click({ timeout: 10000 });
-                console.log(`✅ [步骤] 已点击升级按钮: ${pattern}`);
-                return;
-            }
-        } catch (_) { /* try next */ }
-    }
-
-    const cardTitle = plan === 'plus' ? /ChatGPT Plus/i : /ChatGPT Pro/i;
-    try {
-        const card = page.locator('div').filter({ hasText: cardTitle }).filter({ has: page.getByRole('button') }).first();
-        const btn = card.getByRole('button').filter({ hasText: /升级|Upgrade|Subscribe|Get/i }).first();
-        if (await btn.isVisible({ timeout: 3000 })) {
-            await btn.scrollIntoViewIfNeeded().catch(() => {});
-            await btn.click({ timeout: 10000 });
-            console.log('✅ [步骤] 已点击套餐卡片内的升级按钮');
-            return;
-        }
-    } catch (_) { /* fall through */ }
-
-    if (plan === 'plus') {
-        try {
-            const plusCard = page.locator('div').filter({ has: page.getByText(/ChatGPT Plus|^Plus$/i) }).filter({
-                has: page.getByRole('button', { name: /^Upgrade$|^升级$/i })
-            }).first();
-            const upgradeBtn = plusCard.getByRole('button', { name: /^Upgrade$|^升级$/i }).first();
-            if (await upgradeBtn.isVisible({ timeout: 3000 })) {
-                await upgradeBtn.scrollIntoViewIfNeeded().catch(() => {});
-                await upgradeBtn.click({ timeout: 10000 });
-                console.log('✅ [步骤] 已点击 Plus 卡片 Upgrade 按钮');
-                return;
-            }
-        } catch (_) { /* fall through */ }
-    }
-
-    const fallbackSelectors = plan === 'plus'
-        ? [
-            'button:has-text("升级至 Plus")',
-            'button:has-text("Upgrade to Plus")',
-            '[role="dialog"] >> text=ChatGPT Plus >> .. >> .. >> button:has-text("Upgrade")',
-            'text=ChatGPT Plus >> xpath=ancestor::div[.//button[contains(., "Upgrade") or contains(., "升级")]][1] >> button'
-        ]
-        : [
-            'button:has-text("升级至 Pro")',
-            'button:has-text("Upgrade to Pro")',
-            'text=ChatGPT Pro >> xpath=ancestor::div[.//button[contains(., "Upgrade") or contains(., "升级")]][1] >> button'
-        ];
-
-    for (const sel of fallbackSelectors) {
-        try {
-            const btn = page.locator(sel).first();
-            if (await btn.isVisible({ timeout: 3000 })) {
-                await btn.scrollIntoViewIfNeeded().catch(() => {});
-                await btn.click({ timeout: 10000 });
-                console.log(`✅ [步骤] 已点击升级按钮 (${sel})`);
-                return;
-            }
-        } catch (_) { /* try next */ }
-    }
-
-    const onLogin = await page.locator('text=Sign in with Google').isVisible({ timeout: 1000 }).catch(() => false);
-    if (onLogin) {
-        throw new Error('Session 未生效：定价页显示 Google 登录，无法点击升级按钮');
-    }
-
-    if (await isBusinessPlanView(page)) {
-        throw new Error(`定价页仍在 Business 视图，未找到 ${plan} 套餐；请确认账号可升级 Plus/Pro`);
-    }
-
-    throw new Error(`未找到 ${plan} 套餐的升级按钮，请确认账号可升级且 Session 已登录`);
+    await selectPricingUpgrade(page, plan);
 }
 
 async function waitForCheckoutPage(page, timeout = 90000) {
@@ -746,6 +662,7 @@ async function waitForCheckoutPage(page, timeout = 90000) {
 async function openPricingCheckout(page, { region, planType }) {
     await waitForPricingPage(page);
     await switchToPersonalPlans(page);
+    await expandAllPlans(page);
     await selectPricingRegion(page, region);
     await clickPlanUpgrade(page, planType);
     const checkoutUrl = await waitForCheckoutPage(page);

@@ -8,6 +8,7 @@ const os = require('os');
 const WebSocket = require('ws');
 const axios = require('axios');
 const store = require('./mysql-store');
+const { buildLocalCheckoutEnv } = require('./local-checkout');
 const ipBan = require('./ip-ban');
 const cfAccess = require('./cf-access');
 const runtimeLog = require('./runtime-log');
@@ -3335,20 +3336,31 @@ app.put('/api/admin/region', async (req, res) => {
 
 // ─── Checkout Link Debug API ────────────────────────────────────────────────
 
+app.get('/api/admin/local-checkout', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        res.json({ success: true, config: await store.getLocalCheckoutConfig() });
+    } catch (error) { res.status(500).json({ success: false, message: error.message }); }
+});
+
+app.post('/api/admin/local-checkout', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        const config = await store.saveLocalCheckoutConfig(req.body || {});
+        res.json({ success: true, config, message: '本地开通设置已保存，正式充值和支付链接调试均使用此配置' });
+    } catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+
 app.get('/api/admin/checkout/plans', async (req, res) => {
     try {
         await ensureStoreReady();
         const regionCode = await store.getPaymentRegion();
         const config = REGION_CONFIG[regionCode] || REGION_CONFIG.PH;
-        const resolved = Object.fromEntries(CANONICAL_PLAN_TYPES.map((planType) => {
-            try {
-                return [planType, store.resolvePlanName(planType)];
-            } catch (_) {
-                return [planType, null];
-            }
-        }));
+        const localCheckout = await store.getLocalCheckoutConfig();
+        const resolved = localCheckout.planNames;
         res.json({
             success: true,
+            local_checkout_mode: localCheckout.mode,
             plans: Object.fromEntries(CANONICAL_PLAN_TYPES.map((planType) => [planType, resolved[planType]])),
             plan_options: CANONICAL_PLAN_TYPES.map((planType) => ({
                 type: planType,
@@ -3390,7 +3402,9 @@ app.post('/api/admin/checkout/generate', async (req, res) => {
             return res.status(400).json({ success: false, error: error.message });
         }
         const planNameOverride = body.plan_name ? String(body.plan_name).trim() : '';
-        const resolvedPlanName = planNameOverride || store.resolvePlanName(planType);
+        const localCheckout = await store.getLocalCheckoutConfig();
+        const localEnv = buildLocalCheckoutEnv(localCheckout, planType, planNameOverride);
+        const resolvedPlanName = planNameOverride || localEnv.PLAN_NAME_OVERRIDE;
         const regionCode = String(body.country || body.region || await store.getPaymentRegion()).toUpperCase();
         if (!isSupportedRegion(regionCode)) {
             return res.status(400).json({ success: false, error: `不支持的地区: ${regionCode}` });
@@ -4187,11 +4201,12 @@ function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, p
             const proxy = await store.getActiveProxy();
             const hcaptchaCfg = await store.getHcaptchaConfig();
             const { env: hcaptchaEnv } = buildHcaptchaEnvFromConfig(hcaptchaCfg);
+            const localCheckoutEnv = buildLocalCheckoutEnv(await store.getLocalCheckoutConfig(), planType, planNameOverride);
             const runtimeEnv = {
                 ...process.env,
                 ...hcaptchaEnv,
                 CHECKOUT_DEBUG_ONLY: '1',
-                CHECKOUT_MODE: 'api',
+                ...localCheckoutEnv,
                 CHATGPT_TOKEN: token,
                 CHATGPT_SESSION_JSON: String(sessionRaw || '').startsWith('{') ? sessionRaw : '',
                 CDK_PLAN_TYPE: planType,
@@ -5001,9 +5016,11 @@ function spawnActivationWorker({ task, token, sessionRaw, cdk, cdkDetails, clien
                 const proxy = await store.getActiveProxy();
                 const hcaptchaCfg = await store.getHcaptchaConfig();
                 const { env: hcaptchaEnv } = buildHcaptchaEnvFromConfig(hcaptchaCfg);
+                const localCheckoutEnv = buildLocalCheckoutEnv(await store.getLocalCheckoutConfig(), planType);
                 const runtimeEnv = {
                     ...process.env,
                     ...hcaptchaEnv,
+                    ...localCheckoutEnv,
                     JOB_KEY: task.jobKey,
                     CHATGPT_TOKEN: token,
                     CHATGPT_SESSION_JSON: String(sessionRaw || '').startsWith('{') ? sessionRaw : '',

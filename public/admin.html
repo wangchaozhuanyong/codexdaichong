@@ -286,6 +286,30 @@
                 <p>自助开通并发与维护模式（保存后立即生效，无需重启服务）。Telegram / hCaptcha 需分别点各自区域的「保存」按钮；配置写入 MySQL，重启容器不会丢失（请勿使用 <code>docker compose down -v</code>）。</p>
             </div>
 
+            <div class="panel">
+                <h2 class="panel-title">本地开通设置</h2>
+                <p style="font-size:13px;color:var(--text-dim);margin-top:10px;">第三方代充关闭时生效。此配置同时用于正式充值和支付链接调试；不会自动重试失败订单。</p>
+                <div class="form-group" style="margin-top:16px;">
+                    <label for="local_checkout_mode">开通方式</label>
+                    <select id="local_checkout_mode" class="asset-input">
+                        <option value="auto">自动：已配置的套餐优先使用接口，其余从网页选择</option>
+                        <option value="ui">网页：展开全部套餐并核对目标档位</option>
+                        <option value="api">仅接口：每个套餐必须有已确认的接口标识</option>
+                    </select>
+                </div>
+                <details style="margin:16px 0;">
+                    <summary>高级：已确认的套餐接口标识（可留空）</summary>
+                    <p style="font-size:12px;color:var(--text-dim);margin:10px 0;">未配置的 Pro 档位在自动或网页模式下从账号页面识别；页面没有目标档位时停止，不会改充其他套餐。不要猜测或复用其他套餐的标识。</p>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
+                        <label>Plus<input id="local_checkout_plus" class="asset-input" maxlength="96" autocomplete="off"></label>
+                        <label>Pro 100<input id="local_checkout_pro100" class="asset-input" maxlength="96" placeholder="可留空，使用网页" autocomplete="off"></label>
+                        <label>Pro 200<input id="local_checkout_pro200" class="asset-input" maxlength="96" placeholder="可留空，使用网页" autocomplete="off"></label>
+                        <label>Pro 500<input id="local_checkout_pro500" class="asset-input" maxlength="96" placeholder="可留空，使用网页" autocomplete="off"></label>
+                    </div>
+                </details>
+                <button type="button" class="btn btn-primary" onclick="saveLocalCheckoutConfig()">保存本地开通设置</button>
+                <span id="local_checkout_hint" style="font-size:12px;margin-left:10px;color:var(--text-dim);"></span>
+            </div>
             <!-- 第三方代充 API 设置 -->
             <div class="panel">
                 <h2 class="panel-title">第三方代充 API（协议对接）</h2>
@@ -848,7 +872,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         <div id="checkout_debug" class="page-view">
             <div class="page-header">
                 <h1>支付链接调试</h1>
-                <p>启动 Playwright 浏览器，注入 Session 后调用 Checkout API 生成支付链接（不执行填卡/订阅，正式开通请走前台 CDK）</p>
+                <p>使用「系统配置 → 本地开通设置」生成支付链接。未配置接口标识时可从网页展开全部套餐；只生成链接，不填卡、不付款。</p>
             </div>
 
             <div class="panel">
@@ -858,13 +882,13 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                         <label style="margin-bottom: 6px;">套餐类型</label>
                         <select id="checkout_plan_type" class="asset-input" onchange="syncCheckoutPlanName()">
                             <option value="plus">Plus — chatgptplusplan</option>
-                            <option value="pro100">Pro 100 — 需配置 plan_name</option>
-                            <option value="pro200">Pro 200 — 需配置 plan_name</option>
-                            <option value="pro500">Pro 500 — 需配置 plan_name</option>
+                            <option value="pro100">Pro 100 — 网页识别套餐</option>
+                            <option value="pro200">Pro 200 — 网页识别套餐</option>
+                            <option value="pro500">Pro 500 — 网页识别套餐</option>
                         </select>
                     </div>
                     <div class="form-group" style="margin-bottom: 0;">
-                        <label style="margin-bottom: 6px;">plan_name（自动跟随套餐，可手动改）</label>
+                        <label style="margin-bottom: 6px;">接口套餐标识（可选，仅本次调试）</label>
                         <input type="text" id="checkout_plan_name" class="asset-input" placeholder="chatgptplusplan" autocomplete="off">
                     </div>
                     <div class="form-group" style="margin-bottom: 0;">
@@ -887,7 +911,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 <div style="display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap;">
                     <button class="btn btn-primary" onclick="startCheckoutDebug()" id="checkout_generate_btn">
                         <i data-lucide="play"></i>
-                        启动浏览器调试
+                        生成支付链接（不付款）
                     </button>
                     <button type="button" class="btn btn-secondary" onclick="clearCheckoutDebugForm()">
                         清空
@@ -1513,7 +1537,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         </div>
     </main>
 
-    <script src="/admin.js?v=20261102-cf-access"></script>
+    <script src="/admin.js?v=20261104-local-pro"></script>
 </body>
 
 </html>

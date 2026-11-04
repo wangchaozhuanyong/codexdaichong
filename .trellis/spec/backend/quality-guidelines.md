@@ -114,6 +114,14 @@ const manual = getProductSelectionsForPlan(data, planType, {
 
 ## Four-Tier Provider Contract
 
+### Local Checkout and Debug Contract
+
+- `local_checkout_config` in `app_config` stores the local mode (`auto`, `api`, `ui`) and explicit tier-specific `planNames`. It is independent of third-party provider mapping. Empty canonical Pro codes use exact UI discovery in auto/ui mode; they never inherit Plus or a guessed historical code.
+- `buildLocalCheckoutEnv` is shared by ordinary activation and checkout-debug workers. A temporary debug override is validated against the same local mapping rules. Reject duplicate tier codes, unsupported tiers and malformed identifiers.
+- Pricing discovery expands See all plans before region selection. Upgrade buttons must belong to exactly the requested visible plan card, confirmed by explicit tier labels or a distinct USD tier price. Refuse missing, ambiguous or mismatched tiers; never use the first generic Upgrade button on the page.
+- `CHECKOUT_DEBUG_ONLY=1` may use API or UI navigation, but must return after obtaining the checkout URL and before entering `executePaymentWithRetry`. Debug must not allocate cards, mark CDKs used, clear manual holds or submit payment.
+- Run the pricing-selection browser fixtures, local configuration tests, full `npm test`, JavaScript syntax checks and `git diff --check`. Treat real-account access/eligibility errors separately from passing fixture tests.
+
 - `plan-registry.js` is the canonical source for tier enums, labels, credential aliases, Checkout mappings, Desolate mappings, Orbitcard aliases, reuse limits, and safety margins.
 - Subscription Credential parsing preserves exact `plus`, `pro100`, `pro200`, and `pro500` states; unknown active values remain visible as unknown/raw values rather than becoming Plus.
 - Desolate Open has a documented default only for Plus (`chatgptplusplan`). Pro codes must be supplied explicitly by operator configuration until documented; missing mappings and provider unsupported-plan errors are surfaced clearly.
