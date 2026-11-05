@@ -253,6 +253,13 @@ if (redirectError) return res.status(400).json({ success: false, message: redire
 - Admin status exposes `checkout_page_ready`; describe new success as a loaded payment page with no payment and label media as debug screenshots. Legacy link-only records must not claim the page was opened.
 - `test/checkout-debug.test.js` exercises the real worker phase with synthetic dependencies and the real pricing/button/form flow with all browser responses fulfilled locally. Debug cases must never reach the payment spy; formal cases preserve their existing payment calls. No live Sessions or payment requests are used.
 
+## Canonical Pro Pricing UI Contract
+
+- Canonical `pro100`, `pro200`, and `pro500` must select the exact radio in the Personal Pro card; use the unique visible `查看所有套餐` / `See all plans` expander only when the Pro card is absent. A shared CTA or a default selection alone cannot identify a tier.
+- Confirm the selected radio before clicking the scoped Pro action. For animated prices, read the accessible currency amount in `.pricing-column-price-block`, not the digit animation's combined `innerText`. Never use fixed regional prices as selectors.
+- On official Checkout, require a ChatGPT Pro heading, one selected radio with the same unique currency amount, and the same amount due today. Missing, ambiguous or mismatched evidence must stop the UI flow before it returns to the payment worker. This does not change the API or historical plan paths.
+- Exercise these checks in `test/pricing-checkout.test.js` with offline Playwright fixtures. Never fill payment details to verify the selectors.
+
 ## Testing Requirements
 
 - `test/admin-auth.test.js` must keep proving that a token signed with the legacy cwd-derived secret fails `verifyAdminToken`, with and without `ADMIN_TOKEN_SECRET`.

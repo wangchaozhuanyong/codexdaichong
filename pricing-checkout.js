@@ -46,12 +46,12 @@ const SKIP_REGION_BUTTON_TEXT = /^(Upgrade|Personal|Business|Free|Plus|Pro|Subsc
 
 const PLAN_UPGRADE_PATTERNS = {
     plus: [/升级至\s*Plus/i, /Upgrade to Plus/i, /Get Plus/i, /Subscribe to Plus/i, /^Upgrade$/i],
-    pro100: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro200: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro500: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
     pro_5x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
     pro_20x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i]
 };
+
+const PRO_TIERS = Object.freeze({ pro100: '100', pro200: '200', pro500: '500' });
+const CURRENCY_MARKS = Object.freeze({ MYR: ['MYR', 'RM'], PHP: ['PHP', '₱'], SGD: ['SGD', 'S$'], USD: ['USD', 'US$', '$'] });
 
 function normalizeOptionText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
@@ -152,6 +152,7 @@ async function switchToPersonalPlans(page) {
         () => page.getByRole('button', { name: /^Personal$/i }).first(),
         () => page.getByRole('button', { name: /^个人$/ }).first(),
         () => page.getByRole('radio', { name: /^Personal$/i }).first(),
+        () => page.getByRole('radio', { name: /^个人$/ }).first(),
         () => page.locator('[role="tablist"] [role="tab"]').filter({ hasText: /^Personal$/i }).first(),
         () => page.locator('button').filter({ hasText: /^Personal$/ }).first(),
         () => page.locator('[role="dialog"]').getByText('Personal', { exact: true }).first(),
@@ -164,14 +165,15 @@ async function switchToPersonalPlans(page) {
             if (await el.isVisible({ timeout: 1200 })) {
                 const selected = await el.getAttribute('aria-selected').catch(() => null);
                 const pressed = await el.getAttribute('aria-pressed').catch(() => null);
-                if (selected === 'true' || pressed === 'true') {
+                const checked = await el.getAttribute('aria-checked').catch(() => null);
+                if (selected === 'true' || pressed === 'true' || checked === 'true') {
                     console.log('✅ [步骤] Personal 标签已选中');
                     return;
                 }
                 await el.scrollIntoViewIfNeeded().catch(() => {});
                 await el.click({ timeout: 8000 });
                 await page.waitForTimeout(1800);
-                if (await isPersonalPlanView(page)) {
+                if (await el.getAttribute('aria-checked').catch(() => null) === 'true' || await isPersonalPlanView(page)) {
                     console.log('✅ [步骤] 已切换到个人套餐 (Personal)');
                     return;
                 }
@@ -658,10 +660,97 @@ async function selectPricingRegion(page, regionCode) {
     throw new Error(`无法将定价页切换到目标地区 ${code}（${regionConfig?.label || code}），请检查后台支付地区设置。当前页面: ${finalText}`);
 }
 
+async function requireVisibleOne(locator, description) {
+    const visible = locator.filter({ visible: true });
+    if (await visible.count() !== 1) throw new Error(`无法唯一确认${description}，已停止开通`);
+    return visible;
+}
+
+function moneyPattern(currency, monthly = false) {
+    const marks = CURRENCY_MARKS[currency];
+    if (!marks) throw new Error('无法确认 Pro 套餐的账单币种，已停止开通');
+    return `(?<![\\w$])(?:${marks.map(escapeRegExp).join('|')})\\s*(\\d+(?:,\\d{3})*(?:\\.\\d{1,2})?)(?![\\d,.])${monthly ? '\\s*(?:/\\s*(?:月|month|mo\\b)|每月|per month)' : ''}`;
+}
+
+function readMoneyCents(text, currency, monthly = false) {
+    const matches = [...normalizeOptionText(text).matchAll(new RegExp(moneyPattern(currency, monthly), 'gi'))];
+    if (matches.length !== 1) return null;
+    const amount = Math.round(Number(matches[0][1].replace(/,/g, '')) * 100);
+    return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+}
+
+async function readProMonthlyAmount(card, currency) {
+    const priceBlock = card.locator('.pricing-column-price-block').filter({ visible: true });
+    const blocks = await priceBlock.count();
+    if (!blocks) return readMoneyCents(await card.innerText(), currency, true);
+    if (blocks !== 1 || !/(?:\/\s*(?:月|month|mo\b)|每月|per month)/i.test(await priceBlock.innerText())) return null;
+    // The animated digits repeat in innerText; the accessible amount is a single label.
+    const amounts = await priceBlock.locator('.sr-only').filter({ hasText: new RegExp(moneyPattern(currency), 'i') }).allTextContents();
+    return amounts.length === 1 ? readMoneyCents(amounts[0], currency) : null;
+}
+
+async function selectAndOpenProTier(page, tier, currency) {
+    const surface = await getPricingSurface(page);
+    const title = surface.getByRole('heading', { name: /^(?:ChatGPT\s+)?Pro$/i });
+    if (await title.filter({ visible: true }).count() === 0) {
+        const expand = await requireVisibleOne(surface.getByRole('button', {
+            name: /^(?:See all plans|View all plans|查看更多套餐|查看所有套餐)$/i
+        }), '查看所有套餐入口');
+        await expand.click({ timeout: 8000 });
+        await title.filter({ visible: true }).waitFor({ state: 'visible', timeout: 10000 });
+    }
+    const heading = await requireVisibleOne(title, ' Pro 套餐标题');
+    const card = heading.locator('xpath=ancestor::*[self::div or self::section or self::article][.//*[@role="radiogroup"]][.//button[not(@role="radio")]][1]');
+    if (await card.getByRole('heading', { name: /^(?:ChatGPT\s+)?(?:Free|Go|Plus(?:\s+.*)?|Business|Team|Enterprise|免费版)$/i }).count()) {
+        throw new Error('Pro 套餐卡片范围不明确，已停止开通');
+    }
+    const group = await requireVisibleOne(card.getByRole('radiogroup', {
+        name: /^Pro\s*(?:用量|usage(?: tier| level)?)$/i
+    }), ' Pro 档位选择器');
+    const radio = await requireVisibleOne(group.getByRole('radio', { name: tier, exact: true }), ` Pro ${tier} 档位`);
+    if (!(await radio.isEnabled())) throw new Error(`Pro ${tier} 档位不可用，已停止开通`);
+    if (await radio.getAttribute('aria-checked') !== 'true') await radio.click({ timeout: 8000 });
+    const selected = group.getByRole('radio', { name: tier, exact: true, checked: true });
+    await selected.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {
+        throw new Error(`未确认 Pro ${tier} 档位已选中，已停止开通`);
+    });
+    await requireVisibleOne(group.getByRole('radio', { checked: true }), '已选中的 Pro 档位');
+    const amount = await readProMonthlyAmount(card, currency);
+    if (amount === null) throw new Error(`无法确认 Pro ${tier} 的 ${currency} 月费，已停止开通`);
+    const action = await requireVisibleOne(card.getByRole('button', {
+        name: /^(?:立即体验|Start now|升级至\s*Pro|Upgrade to Pro|Get Pro)$/i
+    }), ` Pro ${tier} 的开通按钮`);
+    if (!(await action.isEnabled())) throw new Error(`Pro ${tier} 开通按钮不可用，已停止开通`);
+    await action.click({ timeout: 10000 });
+    return { tier, currency, amount };
+}
+
+async function verifyProPricingCheckout(page, { tier, currency, amount }) {
+    const url = new URL(page.url());
+    if (url.origin !== 'https://chatgpt.com' || !url.pathname.startsWith('/checkout/')) {
+        throw new Error('未打开官方 Pro Checkout，已停止开通');
+    }
+    const pro = page.getByRole('heading', { name: /^ChatGPT Pro$/i });
+    await pro.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {
+        throw new Error('结账页未显示 ChatGPT Pro，已停止开通');
+    });
+    const amounts = page.getByRole('radio').filter({ hasText: new RegExp(moneyPattern(currency), 'i') });
+    const group = await requireVisibleOne(page.getByRole('radiogroup').filter({ has: amounts }), '结账页的 Pro 档位选择器');
+    const selected = await requireVisibleOne(group.getByRole('radio', { checked: true }), '结账页已选中的 Pro 档位');
+    const visibleOptions = await group.getByRole('radio').filter({ visible: true }).allTextContents();
+    const label = await requireVisibleOne(page.getByText(/^(?:今日应付金额|Total due today|Total today|Amount due today)$/i), '结账页今日应付金额标签');
+    if (readMoneyCents(await selected.innerText(), currency) !== amount
+        || visibleOptions.filter((text) => readMoneyCents(text, currency) === amount).length !== 1
+        || readMoneyCents(await label.locator('xpath=..').innerText(), currency) !== amount) {
+        throw new Error(`结账页套餐或金额与所选 Pro ${tier} 不一致，已停止开通`);
+    }
+    console.log(`✅ [步骤] 已核对 Pro ${tier} 结账档位与金额 (${currency} ${(amount / 100).toFixed(2)})`);
+}
+
 /**
  * 点击对应套餐的升级按钮
  */
-async function clickPlanUpgrade(page, planType) {
+async function clickPlanUpgrade(page, planType, { currency } = {}) {
     const plan = requireReadablePlanType(planType, 'plan_type');
     const patterns = PLAN_UPGRADE_PATTERNS[plan];
     console.log(`📦 [步骤] 正在点击升级按钮 (套餐: ${plan})...`);
@@ -669,6 +758,8 @@ async function clickPlanUpgrade(page, planType) {
     await assertChatGptLoggedIn(page, '升级前');
     await switchToPersonalPlans(page);
     await page.waitForTimeout(1000);
+
+    if (PRO_TIERS[plan]) return selectAndOpenProTier(page, PRO_TIERS[plan], currency);
 
     if (plan === 'plus') {
         const startNow = await findPlusStartNowButton(page);
@@ -782,8 +873,9 @@ async function openPricingCheckout(page, { region, planType }) {
     await waitForPricingPage(page);
     await switchToPersonalPlans(page);
     await selectPricingRegion(page, region);
-    await clickPlanUpgrade(page, planType);
+    const proSelection = await clickPlanUpgrade(page, planType, { currency: getRegionConfig(region || 'PH')?.currency });
     const checkoutUrl = await waitForCheckoutPage(page);
+    if (proSelection) await verifyProPricingCheckout(page, proSelection);
     return checkoutUrl;
 }
 
@@ -794,6 +886,7 @@ module.exports = {
     selectPricingRegion,
     switchToPersonalPlans,
     clickPlanUpgrade,
+    verifyProPricingCheckout,
     waitForCheckoutPage,
     pageShowsTargetRegionPricing
 };
