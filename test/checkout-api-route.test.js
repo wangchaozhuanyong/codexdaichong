@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const { sanitizeCheckoutDiagnostic } = require('../checkout-api-diagnostic');
-const { requireCanonicalPlanType } = require('../plan-registry');
+const { requireCanonicalPlanType, getPlanDefinition, getPlanLabel } = require('../plan-registry');
 const { isSupportedRegion } = require('../region-config');
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8').replace(/\r\n/g, '\n');
@@ -84,12 +84,12 @@ function generateRouteHarness() {
         app: { post: (_route, callback) => { handler = callback; } },
         ensureStoreReady: async () => {},
         parseSessionJson: (raw) => JSON.parse(raw), normalizeSessionToken: () => 'synthetic-token',
-        validateAccessToken: () => ({ valid: true }), requireCanonicalPlanType, isSupportedRegion,
+        validateAccessToken: () => ({ valid: true }), requireCanonicalPlanType, getPlanDefinition, getPlanLabel, isSupportedRegion,
         buildStoredSessionPayload: (raw) => raw, extractEmailFromSession: () => 'synthetic@example.com',
         extractSessionPreview: () => 'synthetic', logTask: () => {},
         spawnCheckoutDebugWorker: (input) => spawned.push(input),
         store: {
-            resolvePlanName: () => 'chatgptplusplan', getPaymentRegion: async () => 'PH',
+            getPaymentRegion: async () => 'PH',
             createTaskLog: async (input) => { created.push(input); return { jobKey: 'synthetic-job' }; },
             updateTaskLog: async () => {}
         }
@@ -110,6 +110,7 @@ describe('existing admin generate route compatibility', () => {
         expect(response.body).toMatchObject({ success: true, jobKey: 'synthetic-job' });
         expect(harness.spawned).toHaveLength(1);
         expect(harness.spawned[0].apiOnly).toBe(apiOnly === true);
+        expect(harness.spawned[0]).toMatchObject({ checkoutMode: 'api', planNameOverride: 'chatgptplusplan' });
         expect(harness.created[0].cdkCode).toBe('[checkout-debug]');
     });
 
@@ -120,6 +121,30 @@ describe('existing admin generate route compatibility', () => {
         expect(response.body.error).toContain('api_only');
         expect(harness.spawned).toHaveLength(0);
         expect(harness.created).toHaveLength(0);
+    });
+
+    it.each(['pro100', 'pro200', 'pro500'])('starts %s pricing UI when the API name is blank', async (planType) => {
+        const harness = generateRouteHarness();
+        const response = await harness.run({ plan_type: planType, plan_name: '   ', country: 'MY' });
+        expect(response.statusCode).toBe(200);
+        expect(harness.spawned).toEqual([expect.objectContaining({ planType, region: 'MY', checkoutMode: 'ui',
+            apiOnly: false, planNameOverride: '' })]);
+    });
+
+    it('rejects a missing API-only plan name before creating a task', async () => {
+        const harness = generateRouteHarness();
+        const response = await harness.run({ plan_type: 'pro100', api_only: true });
+        expect(response.statusCode).toBe(400);
+        expect(response.body.error).toContain('plan_name');
+        expect(harness.created).toHaveLength(0);
+        expect(harness.spawned).toHaveLength(0);
+    });
+
+    it('keeps a nonblank manual override on the API path', async () => {
+        const harness = generateRouteHarness();
+        const response = await harness.run({ plan_type: 'pro100', plan_name: ' synthetic-pro ', api_only: true });
+        expect(response.statusCode).toBe(200);
+        expect(harness.spawned[0]).toMatchObject({ checkoutMode: 'api', planNameOverride: 'synthetic-pro', apiOnly: true });
     });
 });
 
@@ -148,13 +173,14 @@ describe('existing admin status response compatibility', () => {
 });
 
 describe('debug worker environment isolation', () => {
-    it.each([undefined, false, true])('explicitly writes api_only=%s rather than inheriting the parent flag', async (apiOnly) => {
+    it.each([[undefined, undefined], [false, 'api'], [true, 'api'], [false, 'ui']])(
+        'sets api_only=%s and mode=%s explicitly rather than inheriting parent flags', async (apiOnly, checkoutMode) => {
         let finish;
         const done = new Promise((resolve) => { finish = resolve; });
         const captured = [];
         const sandbox = vm.createContext({
             path, __dirname: path.join(__dirname, '..'),
-            process: { env: { CHECKOUT_API_ONLY: '1' } }, console: { error: () => {} },
+            process: { env: { CHECKOUT_API_ONLY: '1', CHECKOUT_MODE: 'other' } }, console: { error: () => {} },
             store: { getActiveProxy: async () => '', getHcaptchaConfig: async () => ({}),
                 updateTaskLog: async (_key, value) => { if (value.status !== 'running') finish(value); } },
             buildHcaptchaEnvFromConfig: () => ({ env: {} }), logTask: () => {},
@@ -168,10 +194,11 @@ describe('debug worker environment isolation', () => {
         const args = { task: { jobKey: 'synthetic-job' }, token: 'synthetic-token', sessionRaw: '{}',
             planType: 'plus', region: 'PH', email: 'synthetic@example.com' };
         if (apiOnly !== undefined) args.apiOnly = apiOnly;
+        if (checkoutMode !== undefined) args.checkoutMode = checkoutMode;
         sandbox.spawn(args);
         expect((await done).status).toBe('success');
         expect(captured).toHaveLength(1);
-        expect(captured[0]).toMatchObject({ CHECKOUT_DEBUG_ONLY: '1', CHECKOUT_MODE: 'api',
+        expect(captured[0]).toMatchObject({ CHECKOUT_DEBUG_ONLY: '1', CHECKOUT_MODE: checkoutMode || 'api',
             CHECKOUT_API_ONLY: apiOnly === true ? '1' : '0' });
     });
 });
