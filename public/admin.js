@@ -4878,7 +4878,7 @@
             const current = sel.value || 'plus';
             sel.innerHTML = CANONICAL_PLAN_TYPES.map((key) => {
                 const name = checkoutPlanMap[key];
-                const suffix = name || '网页选档';
+                const suffix = name || '需手动配置 plan_name';
                 return `<option value="${key}">${escapeHtml(PLAN_LABELS[key])} — ${escapeHtml(suffix)}</option>`;
             }).join('');
             sel.value = CANONICAL_PLAN_TYPES.includes(current) ? current : 'plus';
@@ -4891,7 +4891,7 @@
             const mapped = String(checkoutPlanMap[planType] || '');
             if (input) {
                 input.value = mapped;
-                input.placeholder = mapped || '留空时直接走网页选档';
+                input.placeholder = mapped || `${PLAN_LABELS[planType] || planType} 的 plan_name 未配置`;
                 input.dataset.autoValue = mapped;
             }
         }

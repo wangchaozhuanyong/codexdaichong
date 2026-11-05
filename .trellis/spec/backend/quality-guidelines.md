@@ -247,7 +247,6 @@ if (redirectError) return res.status(400).json({ success: false, message: redire
 ## No-Payment Checkout Debug Contract
 
 - `CHECKOUT_DEBUG_ONLY=1` permits API creation and the existing pricing UI fallback, but must return before `executePaymentWithRetry`, card allocation, billing, form filling, and payment submission.
-- In normal admin debug, an absent default or manual API `plan_name` selects `CHECKOUT_MODE=ui` and keeps the requested canonical plan and region. An explicit `api_only: true` request without a name must return 400 before creating a task. Never guess a name or substitute Plus for an unmapped Pro tier.
 - API link creation alone is not debug completion. `verifyCheckoutDebugPage` must open the link, reject unrelated/login redirects, and passively observe a visible card-number input in the page or an iframe. Headings, URLs, hidden inputs, and Subscribe buttons alone are insufficient.
 - The passive debug verifier must not click CAPTCHA challenges, fill fields, or submit forms. Failure remains a terminal failed debug task with screenshots/logs, no automatic retry and no card/phone deletion flags.
 - Emit `SUCCESS_SCREENSHOT`, `CHECKOUT_URL`, `CHECKOUT_PAGE_READY`, then `CHECKOUT_DEBUG_SUCCESS` only after the form is visible and the screenshot is saved. Keep the existing failure screenshot handling.

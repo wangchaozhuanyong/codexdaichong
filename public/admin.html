@@ -848,7 +848,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         <div id="checkout_debug" class="page-view">
             <div class="page-header">
                 <h1>支付链接调试</h1>
-                <p>有 API 套餐标识时先尝试 API，否则直接走网页选档。支付表单加载后保存截图并停止（不填卡、不付款）。</p>
+                <p>启动浏览器并注入 Session；API 失败时转到网页定价流程，支付表单加载后保存截图并停止（不填卡、不付款）</p>
             </div>
 
             <div class="panel">
@@ -858,13 +858,13 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                         <label style="margin-bottom: 6px;">套餐类型</label>
                         <select id="checkout_plan_type" class="asset-input" onchange="syncCheckoutPlanName()">
                             <option value="plus">Plus — chatgptplusplan</option>
-                            <option value="pro100">Pro 100 — 网页选档</option>
-                            <option value="pro200">Pro 200 — 网页选档</option>
-                            <option value="pro500">Pro 500 — 网页选档</option>
+                            <option value="pro100">Pro 100 — 需配置 plan_name</option>
+                            <option value="pro200">Pro 200 — 需配置 plan_name</option>
+                            <option value="pro500">Pro 500 — 需配置 plan_name</option>
                         </select>
                     </div>
                     <div class="form-group" style="margin-bottom: 0;">
-                        <label style="margin-bottom: 6px;">API plan_name（网页选档可留空）</label>
+                        <label style="margin-bottom: 6px;">plan_name（自动跟随套餐，可手动改）</label>
                         <input type="text" id="checkout_plan_name" class="asset-input" placeholder="chatgptplusplan" autocomplete="off">
                     </div>
                     <div class="form-group" style="margin-bottom: 0;">
@@ -1513,7 +1513,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         </div>
     </main>
 
-    <script src="/admin.js?v=20261105-pro-debug-ui"></script>
+    <script src="/admin.js?v=20261104-checkout-debug-page"></script>
 </body>
 
 </html>

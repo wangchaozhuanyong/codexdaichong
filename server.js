@@ -30,7 +30,6 @@ const {
     CANONICAL_PLAN_TYPES,
     requireCanonicalPlanType,
     requireReadablePlanType,
-    getPlanDefinition,
     getPlanLabel
 } = require('./plan-registry');
 const { buildGptApiFailureDiagnostic } = require('./gpt-api-failure');
@@ -3431,12 +3430,7 @@ app.post('/api/admin/checkout/generate', async (req, res) => {
             return res.status(400).json({ success: false, error: error.message });
         }
         const planNameOverride = body.plan_name ? String(body.plan_name).trim() : '';
-        const resolvedPlanName = planNameOverride || getPlanDefinition(planType).checkoutPlanName;
-        const apiOnly = body.api_only === true;
-        if (apiOnly && !resolvedPlanName) {
-            return res.status(400).json({ success: false, error: `${getPlanLabel(planType)} 纯 API 调试需要已核实的 plan_name` });
-        }
-        const checkoutMode = resolvedPlanName ? 'api' : 'ui';
+        const resolvedPlanName = planNameOverride || store.resolvePlanName(planType);
         const regionCode = String(body.country || body.region || await store.getPaymentRegion()).toUpperCase();
         if (!isSupportedRegion(regionCode)) {
             return res.status(400).json({ success: false, error: `不支持的地区: ${regionCode}` });
@@ -3460,7 +3454,7 @@ app.post('/api/admin/checkout/generate', async (req, res) => {
             progress: 5
         });
 
-        logTask(task.jobKey, `支付链接调试任务已创建 plan=${planType} mode=${checkoutMode} plan_name=${resolvedPlanName || '-'} region=${regionCode} email=${email || '-'}`);
+        logTask(task.jobKey, `支付链接调试任务已创建 plan=${planType} plan_name=${resolvedPlanName} region=${regionCode} email=${email || '-'}`);
         spawnCheckoutDebugWorker({
             task,
             token,
@@ -3469,8 +3463,7 @@ app.post('/api/admin/checkout/generate', async (req, res) => {
             region: regionCode,
             planNameOverride: resolvedPlanName,
             email,
-            apiOnly,
-            checkoutMode
+            apiOnly: body.api_only === true
         });
 
         return res.json({
@@ -4230,7 +4223,7 @@ async function spawnWorkerWithBrowser({ jobKey, runtimeEnv, runScript }) {
     });
 }
 
-function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, planNameOverride, email, apiOnly = false, checkoutMode = 'api' }) {
+function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, planNameOverride, email, apiOnly = false }) {
     (async () => {
         const checkoutScript = path.join(__dirname, 'index.js');
         try {
@@ -4241,7 +4234,7 @@ function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, p
                 ...process.env,
                 ...hcaptchaEnv,
                 CHECKOUT_DEBUG_ONLY: '1',
-                CHECKOUT_MODE: checkoutMode,
+                CHECKOUT_MODE: 'api',
                 CHECKOUT_API_ONLY: apiOnly ? '1' : '0',
                 CHATGPT_TOKEN: token,
                 CHATGPT_SESSION_JSON: String(sessionRaw || '').startsWith('{') ? sessionRaw : '',
