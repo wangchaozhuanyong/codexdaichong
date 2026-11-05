@@ -2,6 +2,7 @@ const { executePaymentWithRetry } = require('./payment-retry');
 const { requireReadablePlanType } = require('./plan-registry');
 const { openPricingCheckout } = require('./pricing-checkout');
 const { openApiCheckout, verifyCheckoutDebugPage } = require('./chatgpt');
+const { sanitizeCheckoutDiagnostic } = require('./checkout-api-diagnostic');
 const store = require('./mysql-store');
 const { getRegionConfig, getRegionBrowserProfile } = require('./region-config');
 const { installChatGptSession, bootstrapChatGptSession } = require('./session-auth');
@@ -525,6 +526,8 @@ async function run() {
 
         // --- Phase 2: API 创建 Checkout（注入账单地区），失败时回退 UI 定价页 ---
         const checkoutMode = String(process.env.CHECKOUT_MODE || 'api').toLowerCase();
+        // This flag is diagnostic-only; formal recharge always keeps its pricing fallback.
+        const apiOnlyDebug = debugOnly && process.env.CHECKOUT_API_ONLY === '1';
         let checkoutOpened = false;
         let checkoutResult = null;
         const planNameOverride = String(CONFIG.planNameOverride || '').trim() || undefined;
@@ -533,6 +536,7 @@ async function run() {
             try {
                 checkoutResult = await openApiCheckout(page, {
                     accessToken: loginInfo.session?.accessToken || CONFIG.chatgptToken,
+                    sessionData: loginInfo.session,
                     planType,
                     country: billingCountry,
                     currency: billingCurrency,
@@ -540,8 +544,16 @@ async function run() {
                     verifyPage: !debugOnly
                 });
                 checkoutOpened = true;
+                console.log(`CHECKOUT_API_RESULT: ${JSON.stringify({ outcome: 'success', diagnostic: sanitizeCheckoutDiagnostic(checkoutResult.diagnostic) })}`);
+                console.log('CHECKOUT_SOURCE: api');
             } catch (apiError) {
-                console.warn(`[Warn] API Checkout 失败: ${apiError.message}`);
+                const diagnostic = sanitizeCheckoutDiagnostic(apiError.diagnostic || { message: apiError.message });
+                console.log(`CHECKOUT_API_RESULT: ${JSON.stringify({ outcome: apiError.checkoutCreated ? 'success' : 'failed', diagnostic })}`);
+                const warning = sanitizeCheckoutDiagnostic({ message: apiError.message }).message;
+                console.warn(`[Warn] API Checkout 失败: ${warning || diagnostic?.message || 'Checkout API 失败'}`);
+                if (apiOnlyDebug) {
+                    throw apiError;
+                }
                 if (checkoutMode === 'api' || debugOnly) {
                     console.log('[Info] 正在回退到 UI 定价页流程...');
                 } else {
@@ -557,6 +569,7 @@ async function run() {
                 planType
             });
             checkoutResult = { checkoutUrl: page.url() };
+            console.log('CHECKOUT_SOURCE: ui');
         }
 
         if (debugOnly) {

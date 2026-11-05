@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Preserve existing customer behavior; allowlisted redacted administrator diagnostics."}
+{"file": ".trellis/tasks/11-05-checkout-api-session-fallback/prd.md", "reason": "Approved strict fallback compatibility and branch-local repair."}
+{"file": "test/checkout-debug.test.js", "reason": "Actual worker phase, default fallback and debug no-payment regression coverage."}

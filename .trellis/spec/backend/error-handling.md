@@ -80,3 +80,14 @@ const diagnostic = buildGptApiFailureDiagnostic({
 notifyTaskOutcome({ event: 'failure', message: finalMessage, diagnostic });
 // Customer task/WebSocket values still use finalMessage.
 ```
+
+
+## Browser Checkout API Diagnostic Contract
+
+- `openApiCheckout` validates a fresh server session via the shared `context.request` only inside its API branch. It must not replace the existing shared browser login/bootstrap behavior. Page `fetch` and locally fulfilled authentication routes are not proof of server authentication.
+- Match users by user ID, or by email when comparable IDs are absent; never equate workspace/account ID with user ID. Use the fresh server access token for Checkout only. Session-read or identity failures throw inside the existing API fallback boundary.
+- Normal recharge and default admin debugging preserve API -> pricing UI fallback. `api_only: true` is an optional boolean on the existing admin generation route and is effective only for debug workers. It must never disable production fallback.
+- Checkout diagnostics contain only bounded scalar `phase`, `httpStatus`, `code`, `type`, `message`, `requestId`, `retryAfter`, and `latencyMs`. Redact credentials before output and never dump raw headers, sessions, or response bodies. Preserve the legacy `error` string for callers.
+- The Checkout creation POST is a single attempt with a 30-second timeout, zero transport retries and no redirects. A timeout is an unknown remote outcome, not proof that no session was created; preserve the existing UI fallback without repeating the POST.
+- Worker `CHECKOUT_API_RESULT` markers track API creation independently from `CHECKOUT_SOURCE` (`api`/`ui`). Admin status fields are additive; old output maps to `unknown`/null. A page-ready success reached through UI fallback does not prove the API succeeded.
+- Debugging stops before card reservation, field filling or payment submission. Regression coverage must exercise API exceptions, session rejection, timeout, API-only diagnostics and successful default UI fallback reaching the existing production payment mock once.

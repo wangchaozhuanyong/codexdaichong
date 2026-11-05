@@ -5,6 +5,8 @@ const store = require('./mysql-store');
 const { getRegionConfig } = require('./region-config');
 const { requireReadablePlanType } = require('./plan-registry');
 const { executePaymentWithRetry } = require('./payment-retry');
+const { readCheckoutSession } = require('./checkout-api-session');
+const { safeText, responseDiagnostic, checkoutError } = require('./checkout-api-diagnostic');
 
 function buildCheckoutPayload(planName, country, currency) {
     const uiMode = String(process.env.CHECKOUT_UI_MODE || 'custom').trim() || 'custom';
@@ -16,48 +18,64 @@ function buildCheckoutPayload(planName, country, currency) {
     };
 }
 
-function formatApiErrorDetail(detail, fallback = '') {
+function formatApiErrorDetail(detail, fallback = '', secrets = [], depth = 0) {
+    if (depth > 2) return fallback;
     if (detail == null || detail === '') return fallback;
-    if (typeof detail === 'string') return detail;
     if (Array.isArray(detail)) {
-        return detail.map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item))).join('; ');
+        return detail.slice(0, 5).map((item) => formatApiErrorDetail(item, '', secrets, depth + 1))
+            .filter(Boolean).join('; ') || fallback;
     }
     if (typeof detail === 'object') {
-        if (detail.message) return String(detail.message);
-        if (detail.msg) return String(detail.msg);
-        return JSON.stringify(detail);
+        return formatApiErrorDetail(detail.message || detail.msg, fallback, secrets, depth + 1);
     }
-    return String(detail);
+    return safeText(detail, 1600, secrets) || fallback;
 }
 
-function parseCheckoutApiResponse(status, bodyText) {
+function parseCheckoutApiResponse(status, bodyText, headers = {}, latencyMs = 0, secrets = []) {
+    if (typeof bodyText !== 'string') {
+        const diagnostic = responseDiagnostic({ status, headers, message: '无法读取 API 响应',
+            code: 'CHECKOUT_RESPONSE_UNREADABLE', type: 'response', latencyMs, secrets });
+        return { ok: false, status, data: {}, error: diagnostic.message, diagnostic };
+    }
     let data = {};
+    let validJson = true;
     try {
         data = bodyText ? JSON.parse(bodyText) : {};
     } catch (_) {
         data = {};
+        validJson = false;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        data = {};
+        validJson = false;
     }
 
     if (status !== 200) {
-        const detail = formatApiErrorDetail(
-            data.detail ?? data.message ?? data.error,
-            bodyText.slice(0, 500) || `HTTP ${status}`
-        );
-        return { ok: false, status, data, error: detail };
+        const detail = [data.detail, data.message, data.error]
+            .map((item) => formatApiErrorDetail(item, '', secrets)).find(Boolean)
+            || (validJson ? `HTTP ${status}` : `HTTP ${status}（API 返回非 JSON 响应）`);
+        const diagnostic = responseDiagnostic({ status, data, headers, message: detail,
+            code: `HTTP_${status}`, type: 'http', latencyMs, secrets });
+        return { ok: false, status, data, error: diagnostic.message, diagnostic };
     }
 
     const service = new ChatGPTService(null, '');
     const resolved = service.resolveCheckoutUrl(data);
     if (!resolved.checkoutUrl) {
+        const diagnostic = responseDiagnostic({ status, data, headers,
+            message: validJson ? 'API 未返回 checkout_session_id 或 url' : 'API 返回非 JSON 响应',
+            code: 'CHECKOUT_INVALID_RESPONSE', type: 'response', latencyMs, secrets });
         return {
             ok: false,
             status,
             data,
-            error: `API 未返回 checkout_session_id 或 url: ${JSON.stringify(data).slice(0, 300)}`
+            error: diagnostic.message,
+            diagnostic
         };
     }
 
-    return { ok: true, status, data, ...resolved };
+    const diagnostic = responseDiagnostic({ status, headers, message: 'Checkout Session 已创建', latencyMs });
+    return { ok: true, status, data, ...resolved, diagnostic };
 }
 
 /**
@@ -176,6 +194,7 @@ class ChatGPTService {
      * @returns {Promise<{ sessionId: string|null, checkoutUrl: string|null, error?: string }>}
      */
     async createCheckoutSession(planType, country, currency, planNameOverride) {
+        const started = Date.now();
         try {
             const planName = String(planNameOverride || store.resolvePlanName(planType)).trim();
             const payload = buildCheckoutPayload(planName, country, currency);
@@ -183,11 +202,15 @@ class ChatGPTService {
 
             const response = await this.request.post("https://chatgpt.com/backend-api/payments/checkout", {
                 headers: this.headers,
-                data: payload
+                data: payload,
+                timeout: 30000,
+                maxRetries: 0,
+                maxRedirects: 0
             });
 
-            const bodyText = await response.text().catch(() => "");
-            const parsed = parseCheckoutApiResponse(response.status(), bodyText);
+            const bodyText = await response.text().catch(() => null);
+            const headers = typeof response.headers === 'function' ? response.headers() : {};
+            const parsed = parseCheckoutApiResponse(response.status(), bodyText, headers, Date.now() - started, [this.token]);
 
             if (!parsed.ok) {
                 const detail = parsed.error;
@@ -198,17 +221,22 @@ class ChatGPTService {
                 } else if (String(detail).includes('permission') || String(detail).includes('already_subscribed')) {
                     console.error("❌ [提示] 该账号可能已订阅或无权重复开通");
                 }
-                return { sessionId: null, checkoutUrl: null, error: detail };
+                return { sessionId: null, checkoutUrl: null, error: detail, diagnostic: parsed.diagnostic };
             }
 
             console.log(`✅ 订单创建成功 (session: ${parsed.sessionId ? parsed.sessionId.slice(0, 24) + '...' : 'unknown'})`);
             if (parsed.checkoutUrl) {
                 console.log(`    支付链接: ${parsed.checkoutUrl.slice(0, 120)}...`);
             }
-            return { sessionId: parsed.sessionId, checkoutUrl: parsed.checkoutUrl };
+            return { sessionId: parsed.sessionId, checkoutUrl: parsed.checkoutUrl, diagnostic: parsed.diagnostic };
         } catch (e) {
-            console.error("[-] 创建 Checkout Session 异常:", e.message);
-            return { sessionId: null, checkoutUrl: null, error: e.message };
+            const diagnostic = responseDiagnostic({
+                message: e.message || '创建 Checkout Session 异常',
+                code: e.code || (/timeout|timed out/i.test(e.message || '') ? 'CHECKOUT_TIMEOUT' : 'CHECKOUT_REQUEST_FAILED'),
+                type: 'network', latencyMs: Date.now() - started, secrets: [this.token]
+            });
+            console.error("[-] 创建 Checkout Session 异常:", diagnostic.message);
+            return { sessionId: null, checkoutUrl: null, error: diagnostic.message, diagnostic };
         }
     }
 
@@ -385,21 +413,20 @@ async function assertCheckoutPageReady(page) {
 /**
  * 通过 API 注入 billing_details 创建 Checkout，并打开 chatgpt.com/checkout
  */
-async function openApiCheckout(page, { accessToken, planType, country, currency, planNameOverride, verifyPage = true }) {
+async function openApiCheckout(page, { accessToken, sessionData, planType, country, currency, planNameOverride, verifyPage = true }) {
     const { assertChatGptLoggedIn } = require('./session-auth');
-    const token = String(accessToken || '').trim();
-    if (!token) {
-        throw new Error('缺少 AccessToken，无法调用 Checkout API');
-    }
-
     const region = String(country || 'PH').toUpperCase();
     const billingCurrency = String(currency || getRegionConfig(region)?.currency || 'PHP').toUpperCase();
     console.log(`🧭 [步骤] 正在通过 API 创建 Checkout (country=${region}, currency=${billingCurrency}, plan=${planType})...`);
 
-    const gpt = new ChatGPTService(page.context().request, token);
+    const request = page.context().request;
+    const actualSession = await readCheckoutSession(request, { accessToken, sessionData });
+    const token = actualSession.accessToken;
+    const gpt = new ChatGPTService(request, token);
     const checkout = await gpt.createCheckoutSession(planType, region, billingCurrency, planNameOverride);
     if (!checkout.checkoutUrl) {
-        throw new Error(`API 创建 Checkout 失败: ${checkout.error || '未返回 data.url'}`);
+        throw checkoutError(`API 创建 Checkout 失败: ${checkout.error || '未返回 data.url'}`,
+            checkout.diagnostic, [accessToken, token]);
     }
 
     const url = checkout.checkoutUrl;
@@ -407,42 +434,53 @@ async function openApiCheckout(page, { accessToken, planType, country, currency,
 
     if (!verifyPage) {
         console.log('✅ [步骤] Checkout Session 已创建（跳过页面打开验证）');
-        return { checkoutUrl: url, sessionId: checkout.sessionId };
+        return { checkoutUrl: url, sessionId: checkout.sessionId, diagnostic: checkout.diagnostic };
     }
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
-    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    const openedAt = Date.now();
+    try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(2000);
 
-    const { hasVisibleLoginChrome, isCheckoutLoginGate, buildSessionNotLoggedInError } = require('./auth-page-detect');
-    if (await isCheckoutLoginGate(page) || await hasVisibleLoginChrome(page)) {
-        const title = await page.title().catch(() => '');
-        console.error(`[Checkout] 打开后仍为未登录 UI url=${page.url().slice(0, 100)} title=${title}`);
-        throw new Error(buildSessionNotLoggedInError('Checkout 支付页'));
+        const { hasVisibleLoginChrome, isCheckoutLoginGate, buildSessionNotLoggedInError } = require('./auth-page-detect');
+        if (await isCheckoutLoginGate(page) || await hasVisibleLoginChrome(page)) {
+            const title = await page.title().catch(() => '');
+            console.error(`[Checkout] 打开后仍为未登录 UI url=${page.url().slice(0, 100)} title=${title}`);
+            throw new Error(buildSessionNotLoggedInError('Checkout 支付页'));
+        }
+
+        const { clearHumanVerification, buildCaptchaRequiredError } = require('./human-verification');
+        const captchaResult = await clearHumanVerification(page, {
+            phase: 'checkout-open',
+            maxWaitMs: Number(process.env.CAPTCHA_CLEAR_TIMEOUT_MS || 120000),
+            maxBypassRounds: 6,
+            requireCheckoutReady: true,
+            checkoutReadyWaitMs: Number(process.env.CHECKOUT_READY_WAIT_MS || 60000)
+        });
+        if (!captchaResult.cleared) {
+            const err = captchaResult.sessionRequired
+                ? (captchaResult.message || buildSessionNotLoggedInError('Checkout 支付页'))
+                : captchaResult.checkoutNotReady
+                    ? 'Checkout 支付表单未能加载，请检查网络或稍后重试'
+                    : buildCaptchaRequiredError();
+            throw new Error(err);
+        }
+
+        const currentUrl = await assertCheckoutPageReady(page);
+
+        await assertChatGptLoggedIn(page, 'Checkout');
+        console.log(`✅ [步骤] Checkout 页面已打开: ${currentUrl.slice(0, 100)}...`);
+        return { checkoutUrl: currentUrl, sessionId: checkout.sessionId, diagnostic: checkout.diagnostic };
+    } catch (error) {
+        const secrets = [accessToken, token, url, checkout.sessionId];
+        const diagnostic = responseDiagnostic({ phase: 'checkout-page',
+            message: error.message || 'Checkout 支付页面未能打开', code: 'CHECKOUT_PAGE_FAILED',
+            type: 'page', latencyMs: Date.now() - openedAt, secrets });
+        const pageError = checkoutError(diagnostic.message, diagnostic, secrets);
+        pageError.checkoutCreated = true;
+        throw pageError;
     }
-
-    const { clearHumanVerification, buildCaptchaRequiredError } = require('./human-verification');
-    const captchaResult = await clearHumanVerification(page, {
-        phase: 'checkout-open',
-        maxWaitMs: Number(process.env.CAPTCHA_CLEAR_TIMEOUT_MS || 120000),
-        maxBypassRounds: 6,
-        requireCheckoutReady: true,
-        checkoutReadyWaitMs: Number(process.env.CHECKOUT_READY_WAIT_MS || 60000)
-    });
-    if (!captchaResult.cleared) {
-        const err = captchaResult.sessionRequired
-            ? (captchaResult.message || buildSessionNotLoggedInError('Checkout 支付页'))
-            : captchaResult.checkoutNotReady
-                ? 'Checkout 支付表单未能加载，请检查网络或稍后重试'
-                : buildCaptchaRequiredError();
-        throw new Error(err);
-    }
-
-    const currentUrl = await assertCheckoutPageReady(page);
-
-    await assertChatGptLoggedIn(page, 'Checkout');
-    console.log(`✅ [步骤] Checkout 页面已打开: ${currentUrl.slice(0, 100)}...`);
-    return { checkoutUrl: currentUrl, sessionId: checkout.sessionId };
 }
 
 /** Passive debug check: observe the card form without filling or submitting it. */

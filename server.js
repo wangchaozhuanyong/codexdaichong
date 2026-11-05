@@ -33,6 +33,7 @@ const {
     getPlanLabel
 } = require('./plan-registry');
 const { buildGptApiFailureDiagnostic } = require('./gpt-api-failure');
+const { sanitizeCheckoutDiagnostic } = require('./checkout-api-diagnostic');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -1050,17 +1051,42 @@ function splitTaskMediaPaths(items) {
 }
 
 function extractCheckoutUrlFromOutput(output) {
-    const match = String(output || '').match(/CHECKOUT_URL:\s*(https?\S+)/);
+    const match = String(output || '').match(/^CHECKOUT_URL:[ \t]*(https?\S+)/m);
     return match ? match[1].trim() : '';
 }
 
+function withoutCheckoutApiDiagnostics(output) {
+    return String(output || '').replace(/^CHECKOUT_API_RESULT: [^\r\n]*$/gm, '');
+}
+
+// Parse only bounded worker markers; arbitrary task output is not a diagnostic object.
+function extractCheckoutApiMetadata(output) {
+    const result = { api_outcome: 'unknown', checkout_source: 'unknown', diagnostic: null };
+    const text = String(output || '');
+    const pattern = /^CHECKOUT_API_RESULT: ([^\r\n]*)$/gm;
+    let match;
+    while ((match = pattern.exec(text))) {
+        if (match[1].length > 4096) continue;
+        try {
+            const data = JSON.parse(match[1]);
+            if (data?.outcome !== 'success' && data?.outcome !== 'failed') continue;
+            const diagnostic = sanitizeCheckoutDiagnostic(data.diagnostic);
+            result.api_outcome = data.outcome;
+            result.diagnostic = diagnostic;
+        } catch (_) { /* Partial or old marker; keep the latest valid result. */ }
+    }
+    const sources = /^CHECKOUT_SOURCE: (api|ui)[ \t]*$/gm;
+    while ((match = sources.exec(text))) result.checkout_source = match[1];
+    return result;
+}
+
 function analyzeCheckoutDebugOutput(output, timedOut) {
-    const normalized = String(output || '');
+    const normalized = withoutCheckoutApiDiagnostics(output);
     const runtimeError = extractRuntimeErrorMessage(normalized);
 
-    if (normalized.includes('CHECKOUT_DEBUG_SUCCESS')) {
+    if (/^CHECKOUT_DEBUG_SUCCESS$/m.test(normalized)) {
         const checkoutUrl = extractCheckoutUrlFromOutput(normalized);
-        const checkoutPageReady = normalized.includes('CHECKOUT_PAGE_READY');
+        const checkoutPageReady = /^CHECKOUT_PAGE_READY$/m.test(normalized);
         return {
             status: 'success',
             message: checkoutPageReady ? '支付页面已打开，调试已停止（未填卡、未付款）'
@@ -1074,7 +1100,7 @@ function analyzeCheckoutDebugOutput(output, timedOut) {
         };
     }
 
-    const base = analyzeProcessOutput(output, timedOut);
+    const base = analyzeProcessOutput(normalized, timedOut);
     if (base.status === 'retry') {
         return {
             ...base,
@@ -1141,7 +1167,7 @@ function extractRuntimeErrorMessage(output) {
 }
 
 function analyzeProcessOutput(output, timedOut) {
-    const normalized = String(output || '');
+    const normalized = withoutCheckoutApiDiagnostics(output);
     const runtimeError = extractRuntimeErrorMessage(normalized);
     const reachedPayment = normalized.includes('[Stripe] Step')
         || normalized.includes('正在使用 Stripe 信用卡')
@@ -1529,7 +1555,7 @@ function analyzeProcessOutput(output, timedOut) {
 }
 
 function getCheckoutProgress(output, status = 'running') {
-    const text = String(output || '');
+    const text = withoutCheckoutApiDiagnostics(output);
     const markers = [
         ['正在检查代理连通性', 2],
         ['代理连接成功! 代理公网 IP', 5],
@@ -3379,6 +3405,9 @@ app.post('/api/admin/checkout/generate', async (req, res) => {
     try {
         await ensureStoreReady();
         const body = req.body || {};
+        if (body.api_only !== undefined && typeof body.api_only !== 'boolean') {
+            return res.status(400).json({ success: false, error: 'api_only 必须是布尔值' });
+        }
         const rawSession = String(body.session || '').trim();
         if (!rawSession) {
             return res.status(400).json({ success: false, error: '请提供 Session JSON' });
@@ -3433,7 +3462,8 @@ app.post('/api/admin/checkout/generate', async (req, res) => {
             planType,
             region: regionCode,
             planNameOverride: resolvedPlanName,
-            email
+            email,
+            apiOnly: body.api_only === true
         });
 
         return res.json({
@@ -3477,7 +3507,8 @@ app.get('/api/admin/checkout/status/:jobKey', async (req, res) => {
             message: task.message,
             progress: Number(task.progress || 0),
             checkout_url: checkoutUrl || null,
-            checkout_page_ready: String(task.raw_output || '').includes('CHECKOUT_PAGE_READY'),
+            checkout_page_ready: /^CHECKOUT_PAGE_READY$/m.test(String(task.raw_output || '')),
+            ...extractCheckoutApiMetadata(task.raw_output),
             screenshots,
             videos
         });
@@ -4192,7 +4223,7 @@ async function spawnWorkerWithBrowser({ jobKey, runtimeEnv, runScript }) {
     });
 }
 
-function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, planNameOverride, email }) {
+function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, planNameOverride, email, apiOnly = false }) {
     (async () => {
         const checkoutScript = path.join(__dirname, 'index.js');
         try {
@@ -4204,6 +4235,7 @@ function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, p
                 ...hcaptchaEnv,
                 CHECKOUT_DEBUG_ONLY: '1',
                 CHECKOUT_MODE: 'api',
+                CHECKOUT_API_ONLY: apiOnly ? '1' : '0',
                 CHATGPT_TOKEN: token,
                 CHATGPT_SESSION_JSON: String(sessionRaw || '').startsWith('{') ? sessionRaw : '',
                 CDK_PLAN_TYPE: planType,

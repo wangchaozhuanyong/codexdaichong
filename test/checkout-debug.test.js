@@ -8,6 +8,7 @@ const vm = require('vm');
 const { chromium } = require('playwright');
 const { verifyCheckoutDebugPage } = require('../chatgpt');
 const { openPricingCheckout } = require('../pricing-checkout');
+const { sanitizeCheckoutDiagnostic } = require('../checkout-api-diagnostic');
 
 const PAYMENT_URL = 'https://chatgpt.com/checkout/openai_llc/oaics_synthetic';
 const PAYMENT_HTML = '<h1>Configure your plan</h1><form onsubmit="document.body.dataset.submitted=1;return false">'
@@ -23,13 +24,14 @@ function extract(source, startMarker, endMarker) {
 }
 
 function createWorkerPhase({ apiError, uiError, verifyError, screenshot = 'debug_screenshots/checkout_debug/ready.png',
-    debugOnly = true, mode = 'api' } = {}) {
+    debugOnly = true, mode = 'api', apiOnly = false } = {}) {
     const messages = [];
     const calls = [];
     let currentUrl = 'https://chatgpt.com/';
     const context = {
         console: { log: (...args) => messages.push(args.join(' ')), warn: (...args) => messages.push(args.join(' ')) },
-        process: { env: { CHECKOUT_MODE: mode } },
+        process: { env: { CHECKOUT_MODE: mode, CHECKOUT_API_ONLY: apiOnly ? '1' : '0' } },
+        sanitizeCheckoutDiagnostic,
         debugOnly,
         CONFIG: { planNameOverride: 'synthetic_plan', chatgptToken: 'synthetic-token' },
         loginInfo: { session: { accessToken: 'synthetic-token' } },
@@ -38,7 +40,7 @@ function createWorkerPhase({ apiError, uiError, verifyError, screenshot = 'debug
         page: { url: () => currentUrl },
         openApiCheckout: async (_page, options) => {
             calls.push(['api', options]);
-            if (apiError) throw new Error(apiError);
+            if (apiError) throw apiError instanceof Error ? apiError : new Error(apiError);
             return { checkoutUrl: PAYMENT_URL };
         },
         openPricingCheckout: async (_page, options) => {
@@ -124,6 +126,79 @@ describe('actual checkout worker phase: debug stops before payment', () => {
         await h.run();
         expect(h.calls.map(([kind]) => kind)).toEqual(['api', 'ui', 'payment']);
     });
+    it.each([
+        'HTTP 400 unusual_activity',
+        'HTTP 429 rate limit',
+        'API session expired',
+        'API session user mismatch',
+        'Timeout 30000ms exceeded',
+        'Malformed checkout response',
+        'Checkout page verification failed'
+    ])('keeps the formal pricing fallback and payment after %s', async (reason) => {
+        const h = createWorkerPhase({ debugOnly: false, apiError: reason });
+        await h.run();
+        expect(h.calls.map(([kind]) => kind)).toEqual(['api', 'ui', 'payment']);
+        expect(h.calls.filter(([kind]) => kind === 'ui')).toHaveLength(1);
+        expect(h.messages.join('\n')).toContain('正在回退到 UI 定价页流程');
+        expect(h.messages.join('\n')).toContain('CHECKOUT_SOURCE: ui');
+        expect(h.messages.join('\n')).toContain('"outcome":"failed"');
+    });
+
+    it('passes the expected session identity to the API branch', async () => {
+        const h = createWorkerPhase();
+        await h.run();
+        expect(h.calls[0][1].sessionData).toEqual({ accessToken: 'synthetic-token' });
+        expect(h.messages.join('\n')).toContain('CHECKOUT_SOURCE: api');
+    });
+
+    it('stops API-only debugging after rejection without touching UI or payment', async () => {
+        const h = createWorkerPhase({ apiOnly: true, apiError: 'HTTP 400 unusual_activity' });
+        await expect(h.run()).rejects.toThrow(/unusual_activity/);
+        expect(h.calls.map(([kind]) => kind)).toEqual(['api']);
+        expect(h.messages.join('\n')).not.toContain('CHECKOUT_SOURCE:');
+        expect(h.messages.join('\n')).not.toContain('CHECKOUT_DEBUG_SUCCESS');
+    });
+
+    it('ignores the API-only diagnostic flag for formal recharge', async () => {
+        const h = createWorkerPhase({ debugOnly: false, apiOnly: true, apiError: 'HTTP 400' });
+        await h.run();
+        expect(h.calls.map(([kind]) => kind)).toEqual(['api', 'ui', 'payment']);
+    });
+
+    it('does not send a second API request after a successful API-only debug run', async () => {
+        const h = createWorkerPhase({ apiOnly: true });
+        await h.run();
+        expect(h.calls.map(([kind]) => kind)).toEqual(['api', 'verify', 'screenshot']);
+        expect(h.messages.join('\n')).toContain('CHECKOUT_DEBUG_SUCCESS');
+    });
+
+    it('keeps API creation success distinct from a later page failure and UI recovery', async () => {
+        const error = new Error('Checkout page verification failed');
+        error.checkoutCreated = true;
+        error.diagnostic = { phase: 'checkout-page', httpStatus: 200, message: error.message };
+        const h = createWorkerPhase({ debugOnly: false, apiError: error });
+        await h.run();
+        expect(h.calls.map(([kind]) => kind)).toEqual(['api', 'ui', 'payment']);
+        const marker = h.messages.find((line) => line.startsWith('CHECKOUT_API_RESULT:'));
+        expect(JSON.parse(marker.slice('CHECKOUT_API_RESULT:'.length)).outcome).toBe('success');
+        expect(h.messages.join('\n')).toContain('CHECKOUT_SOURCE: ui');
+    });
+
+    it('redacts credentials from diagnostic markers and warnings', async () => {
+        const error = new Error('Authorization: Bearer synthetic-secret');
+        error.diagnostic = { phase: 'checkout-create', message: error.message,
+            code: 'unusual_activity', httpStatus: 400, requestId: 'request-synthetic',
+            accessToken: 'synthetic-secret', cookies: [{ value: 'cookie-secret' }] };
+        const h = createWorkerPhase({ apiError: error });
+        await h.run();
+        const output = h.messages.join('\n');
+        expect(output).not.toContain('synthetic-secret');
+        expect(output).not.toContain('cookie-secret');
+        expect(output).toContain('unusual_activity');
+        expect(output).toContain('request-synthetic');
+        expect(h.calls.map(([kind]) => kind)).toEqual(['api', 'ui', 'verify', 'screenshot']);
+    });
+
 });
 
 describe('passive checkout debug browser verification', () => {
@@ -278,6 +353,21 @@ describe('checkout debug result presentation', () => {
         const legacy = sandbox.analyze('CHECKOUT_URL: ' + PAYMENT_URL + '\nCHECKOUT_DEBUG_SUCCESS', false);
         expect(legacy.checkoutPageReady).toBe(false);
         expect(legacy.reachedPayment).toBe(false);
+    });
+
+    it('never treats text inside a diagnostic as a page-ready or payment marker', () => {
+        const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+        const sandbox = vm.createContext({
+            extractRuntimeErrorMessage: () => 'Checkout API rejected',
+            analyzeProcessOutput: (output) => ({ status: output.includes('PAYMENT_SUCCESS') ? 'success' : 'failed' })
+        });
+        vm.runInContext(extract(source, 'function extractCheckoutUrlFromOutput(', 'function extractCardLast4FromOutput(')
+            + '\nthis.analyze = analyzeCheckoutDebugOutput; this.extractUrl = extractCheckoutUrlFromOutput;', sandbox);
+        const output = 'CHECKOUT_API_RESULT: ' + JSON.stringify({ outcome: 'failed', diagnostic: {
+            message: 'CHECKOUT_DEBUG_SUCCESS CHECKOUT_PAGE_READY PAYMENT_SUCCESS CHECKOUT_URL: https://invalid.test/'
+        } });
+        expect(sandbox.analyze(output, false).status).toBe('failed');
+        expect(sandbox.extractUrl(output)).toBe('');
     });
 
     it('renders the verified page and success screenshot without labelling it as failure', () => {
