@@ -91,3 +91,11 @@ notifyTaskOutcome({ event: 'failure', message: finalMessage, diagnostic });
 - The Checkout creation POST is a single attempt with a 30-second timeout, zero transport retries and no redirects. A timeout is an unknown remote outcome, not proof that no session was created; preserve the existing UI fallback without repeating the POST.
 - Worker `CHECKOUT_API_RESULT` markers track API creation independently from `CHECKOUT_SOURCE` (`api`/`ui`). Admin status fields are additive; old output maps to `unknown`/null. A page-ready success reached through UI fallback does not prove the API succeeded.
 - Debugging stops before card reservation, field filling or payment submission. Regression coverage must exercise API exceptions, session rejection, timeout, API-only diagnostics and successful default UI fallback reaching the existing production payment mock once.
+
+## Stripe Checkout Payment Result
+
+- Both post-submit checks use short, rendered messages. Ignore scripts, hidden text, and fragments joined across lines. Use fixed diagnostic text for recognized results.
+- Only an explicit refusal permits card exhaustion or the existing next-card attempt. A generic failure, timeout, or browser error after submission means the outcome is unknown and requires manual confirmation.
+- Report the standalone `PAYMENT_RESULT_UNKNOWN` worker line before writing the attempt record. The parent must prioritize it over prior attempt logs. An unknown attempt creates no success ledger entry and uses `payment_result_unknown` for its failed execution record.
+- Redact and bound billing errors to 512 UTF-16 code units without splitting a character. Keep database write errors observable.
+- Exercise these branches with offline Chromium, a fake card pool, and synthetic worker output. Do not submit a real payment for regression testing.
