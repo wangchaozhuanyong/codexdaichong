@@ -668,85 +668,90 @@ async function completeStripeCardPayment(page, cardInfo, address, options = {}) 
 const PAYMENT_RESULT_TIMEOUT_MS = Number(process.env.PAYMENT_RESULT_TIMEOUT_MS) || 180000;
 const PAYMENT_RESULT_POLL_MS = 2000;
 
-const PAYMENT_SUCCESS_PATTERNS = [
-    /redirect_status=succeeded/i,
-    /thank you for subscribing/i,
-    /subscription is active/i,
-    /subscription active/i,
-    /you.?re all set/i,
-    /订阅成功/i,
-    /支付成功/i,
-    /welcome to plus/i,
-    /welcome to pro/i,
-    /已成功订阅/i
-];
+function paymentMessagePattern(phrases) {
+    const alternatives = phrases.map((phrase) => phrase.source).join('|');
+    return new RegExp(`^(?:${alternatives})(?=$|[.!。！])`, 'i');
+}
 
-const PAYMENT_DECLINE_PATTERNS = [
-    /your card was declined/i,
-    /your card has been declined/i,
-    /card was declined/i,
-    /card has been declined/i,
-    /payment was not approved/i,
-    /payment was declined/i,
-    /payment could not be processed/i,
-    /payment method could not be verified/i,
-    /your bank may have declined/i,
-    /payment details may be incorrect/i,
-    /we are unable to authenticate your payment method/i,
-    /payment failed/i,
-    /payment was not successful/i,
-    /could not be completed/i,
-    /transaction (was )?(declined|failed)/i,
-    /insufficient funds/i,
-    /do not honor/i,
-    /incorrect.*cvc/i,
-    /expired card/i,
-    /card number is (incorrect|invalid)/i,
-    /银行卡被拒绝/i,
-    /支付未(通过|成功|获批)/i,
-    /未获批准/i,
-    /拒付/i,
-    /被拒绝/i,
-    /try another (payment )?method/i,
-    /try a different (card|payment)/i,
-    /unable to authenticate/i
-];
+const PAYMENT_SUCCESS_TEXT = paymentMessagePattern([
+    /thank you for subscribing/,
+    /(?:your )?subscription (?:is (?:now )?)?active/,
+    /you['’]re all set/,
+    /welcome to (?:plus|pro)/,
+    /订阅成功|支付成功|已成功订阅/
+]);
 
-function buildDeclinedPaymentResult(page, msg, screenshotPath) {
+// Only an explicit, visible refusal can authorize another card attempt.
+const PAYMENT_DECLINE_TEXT = paymentMessagePattern([
+    /(?:your )?card (?:was|has been) declined/,
+    /payment was (?:declined|not approved)/,
+    /transaction (?:was )?declined/,
+    /(?:your card has )?insufficient funds/,
+    /do not honor/,
+    /incorrect cvc|cvc is incorrect/,
+    /(?:your )?card['’]s security code is incorrect/,
+    /expired card|your card has expired/,
+    /(?:your )?card number is (?:incorrect|invalid)/,
+    /银行卡被拒绝|支付未获批准|银行卡安全码错误/
+]);
+
+const PAYMENT_UNCERTAIN_TEXT = paymentMessagePattern([
+    /payment (?:failed|was not successful|could not be processed|method could not be verified)/,
+    /your bank may have declined/,
+    /payment details may be incorrect/,
+    /we are unable to authenticate your payment method/,
+    /transaction (?:was )?failed/,
+    /支付失败|支付未成功/
+]);
+
+async function hasVisiblePaymentText(page, pattern) {
+    // Select candidate elements by text, then check the rendered lines. The
+    // selector alone can match hidden descendants or join separate lines.
+    return page.getByText(pattern).evaluateAll((elements, { source, flags }) => {
+        const pattern = new RegExp(source, flags);
+        const candidates = elements.filter((element) => element.checkVisibility({
+            opacityProperty: true,
+            visibilityProperty: true,
+            contentVisibilityAuto: true
+        }) && element.innerText?.split('\n').some((line) => {
+            const text = line.trim().replace(/\s+/g, ' ');
+            return text.length <= 240 && pattern.test(text);
+        }));
+        if (candidates.length === 0) return false;
+
+        // Include vertically scrollable content, but exclude text clipped by
+        // CSS, hidden in a scroll container, or positioned outside the page.
+        const above = Math.max(0, window.scrollY);
+        const below = Math.max(0, document.scrollingElement.scrollHeight - window.innerHeight - above);
+        return new Promise((resolve) => {
+            const observer = new IntersectionObserver((entries) => {
+                finish(entries.some(({ intersectionRect }) => intersectionRect.width > 1 && intersectionRect.height > 1));
+            }, { rootMargin: `${above}px 0px ${below}px 0px` });
+            const finish = (visible) => {
+                observer.disconnect();
+                window.clearTimeout(timer);
+                resolve(visible);
+            };
+            const timer = window.setTimeout(() => finish(false), 500);
+            for (const element of candidates) observer.observe(element);
+        });
+    }, { source: pattern.source, flags: pattern.flags }).catch(() => false);
+}
+
+async function buildDeclinedPaymentResult(page) {
+    console.log('[Stripe] ❌ 检测到明确的银行卡拒付提示');
+    const screenshotPath = await saveDebugScreenshot(page, 'payment_declined');
     return {
         success: false,
-        error: `银行卡被拒绝: ${msg}`,
+        error: '银行卡被拒绝，支付页面已明确提示',
         screenshot: screenshotPath,
         declined: true,
         canRetryCard: true
     };
 }
 
-/**
- * 扫描页面是否已出现 Stripe/OpenAI 拒付文案
- * @returns {Promise<string|null>}
- */
-async function detectPaymentDeclineOnPage(page) {
-    try {
-        const bodyText = String(await page.textContent('body', { timeout: 3000 }).catch(() => '') || '');
-        for (const re of PAYMENT_DECLINE_PATTERNS) {
-            if (re.test(bodyText)) {
-                const match = bodyText.match(re);
-                return match ? match[0] : 'card declined';
-            }
-        }
-
-        const alerts = page.getByRole('alert');
-        const alertCount = await alerts.count();
-        for (let i = 0; i < alertCount; i += 1) {
-            const alertText = String(await alerts.nth(i).textContent({ timeout: 500 }).catch(() => '') || '');
-            if (!alertText.trim()) continue;
-            if (PAYMENT_DECLINE_PATTERNS.some((re) => re.test(alertText))) {
-                return alertText.trim();
-            }
-        }
-    } catch (_) { /* ignore */ }
-    return null;
+function buildUnknownPaymentResult(screenshot, error = '支付结果检测失败，付款结果待核实') {
+    return { success: false, error, screenshot, resultUnknown: true, declined: false, canRetryCard: false };
 }
 
 async function dismissCheckoutPaymentError(page) {
@@ -783,15 +788,8 @@ async function handlePostSubmitPhase(page) {
     console.log(`[Stripe] Step 9.5: 并行等待 hCaptcha 弹层或拒付结果（最长 ${Math.round(overlayWaitMs / 1000)}s）...`);
 
     while (Date.now() < deadline) {
-        const declineMsg = await detectPaymentDeclineOnPage(page);
-        if (declineMsg) {
-            console.log(`[Stripe] ❌ 提交后快速检测到拒付（未出现验证）: ${declineMsg}`);
-            const screenshotPath = await saveDebugScreenshot(page, 'payment_declined');
-            return {
-                action: 'declined',
-                declineMsg,
-                screenshot: screenshotPath
-            };
+        if (await hasVisiblePaymentText(page, PAYMENT_DECLINE_TEXT)) {
+            return { action: 'declined' };
         }
 
         if (await hasAnyCheckoutCaptchaSignal(page)) {
@@ -860,41 +858,33 @@ async function finalizeCheckoutPayment(page, holderName) {
         return { success: false, error: '无法找到提交/支付按钮', screenshot: screenshotPath };
     }
 
-    const postResult = await handlePostSubmitPhase(page);
-    if (postResult.action === 'declined') {
-        return buildDeclinedPaymentResult(page, postResult.declineMsg, postResult.screenshot);
-    }
-    if (postResult.action === 'captcha_failed') {
-        return {
-            success: false,
-            error: postResult.error,
-            screenshot: postResult.screenshot,
-            captchaRequired: true
-        };
-    }
-    if (postResult.action === 'success') {
-        console.log('[Stripe] ✅ 支付成功！');
-        const screenshotPath = await saveDebugScreenshot(page, 'payment_success');
-        return { success: true, holderName, screenshot: screenshotPath };
-    }
+    try {
+        const postResult = await handlePostSubmitPhase(page);
+        if (postResult.action === 'declined') {
+            return await buildDeclinedPaymentResult(page);
+        }
+        if (postResult.action === 'captcha_failed') {
+            return {
+                success: false,
+                error: postResult.error,
+                screenshot: postResult.screenshot,
+                captchaRequired: true
+            };
+        }
+        if (postResult.action === 'success') {
+            console.log('[Stripe] ✅ 支付成功！');
+            return await buildPaymentSuccessResult(page, holderName);
+        }
 
-    const paymentOutcome = await waitForPaymentResult(page, holderName);
-    if (paymentOutcome.success) {
-        console.log('[Stripe] ✅ 支付成功！');
-        return {
-            success: true,
-            holderName: paymentOutcome.holderName,
-            screenshot: paymentOutcome.screenshot
-        };
+        const paymentOutcome = await waitForPaymentResult(page, holderName);
+        if (paymentOutcome.success) {
+            console.log('[Stripe] ✅ 支付成功！');
+        }
+        return paymentOutcome;
+    } catch (_) {
+        const screenshotPath = await saveDebugScreenshot(page, 'payment_result_unknown');
+        return buildUnknownPaymentResult(screenshotPath);
     }
-    if (paymentOutcome.error && PAYMENT_DECLINE_PATTERNS.some((re) => re.test(paymentOutcome.error))) {
-        return {
-            ...paymentOutcome,
-            declined: true,
-            canRetryCard: true
-        };
-    }
-    return paymentOutcome;
 }
 
 /**
@@ -956,38 +946,19 @@ async function waitForPaymentResult(page, holderName) {
             return buildPaymentSuccessResult(page, holderName);
         }
 
-        const bodyText = String(await page.textContent('body', { timeout: 8000 }).catch(() => '') || '');
-
-        for (const re of PAYMENT_DECLINE_PATTERNS) {
-            if (re.test(bodyText)) {
-                const match = bodyText.match(re);
-                const msg = match ? match[0] : 'card declined';
-                console.log(`[Stripe] ❌ 检测到拒付/失败: ${msg}`);
-                const screenshotPath = await saveDebugScreenshot(page, 'payment_declined');
-                return buildDeclinedPaymentResult(page, msg, screenshotPath);
-            }
+        if (await hasVisiblePaymentText(page, PAYMENT_DECLINE_TEXT)) {
+            return buildDeclinedPaymentResult(page);
         }
 
-        for (const re of PAYMENT_SUCCESS_PATTERNS) {
-            if (re.test(bodyText)) {
-                console.log(`[Stripe] ✅ 页面文案确认支付成功`);
-                return buildPaymentSuccessResult(page, holderName);
-            }
+        if (await hasVisiblePaymentText(page, PAYMENT_SUCCESS_TEXT)) {
+            console.log('[Stripe] ✅ 页面文案确认支付成功');
+            return buildPaymentSuccessResult(page, holderName);
         }
 
-        try {
-            const alerts = page.getByRole('alert');
-            const alertCount = await alerts.count();
-            for (let i = 0; i < alertCount; i += 1) {
-                const alertText = String(await alerts.nth(i).textContent({ timeout: 500 }).catch(() => '') || '');
-                if (!alertText.trim()) continue;
-                if (PAYMENT_DECLINE_PATTERNS.some((re) => re.test(alertText))) {
-                    console.log(`[Stripe] ❌ Alert 拒付: ${alertText.trim()}`);
-                    const screenshotPath = await saveDebugScreenshot(page, 'payment_declined');
-                    return buildDeclinedPaymentResult(page, alertText.trim(), screenshotPath);
-                }
-            }
-        } catch (_) { /* no alerts */ }
+        if (await hasVisiblePaymentText(page, PAYMENT_UNCERTAIN_TEXT)) {
+            const screenshotPath = await saveDebugScreenshot(page, 'payment_result_unknown');
+            return buildUnknownPaymentResult(screenshotPath);
+        }
 
         const now = Date.now();
         if (now - lastProgressLog >= 15000) {
@@ -1021,11 +992,7 @@ async function waitForPaymentResult(page, holderName) {
             captchaRequired: true
         };
     }
-    return {
-        success: false,
-        error: `支付结果等待超时（${maxSec}s），当前 URL: ${page.url()}`,
-        screenshot: screenshotPath
-    };
+    return buildUnknownPaymentResult(screenshotPath, `支付结果等待超时（${maxSec}s），付款结果待核实`);
 }
 
 // ==================== Internal Helpers ====================

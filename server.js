@@ -1168,6 +1168,17 @@ function extractRuntimeErrorMessage(output) {
 
 function analyzeProcessOutput(output, timedOut) {
     const normalized = withoutCheckoutApiDiagnostics(output);
+    // The final unknown result takes precedence over text from earlier attempts.
+    if (/(?:^|\n)PAYMENT_RESULT_UNKNOWN(?:\r?\n|$)/.test(normalized)) {
+        return {
+            status: 'manual',
+            message: '付款结果待核实，已转人工确认，请勿重复充值，请联系客服处理。',
+            reachedPayment: true,
+            shouldRetry: false,
+            deletePhone: false,
+            deleteCard: false
+        };
+    }
     const runtimeError = extractRuntimeErrorMessage(normalized);
     const reachedPayment = normalized.includes('[Stripe] Step')
         || normalized.includes('正在使用 Stripe 信用卡')

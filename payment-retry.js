@@ -15,10 +15,14 @@ const { completeStripeCardPayment, readCheckoutDueAmount, estimateTaxFreeAmount 
 const { pickBillingAddressForCheckout, markAddressBound } = require('./tax-free-address');
 const { getRegionConfig } = require('./region-config');
 const { requireReadablePlanType } = require('./plan-registry');
+const { redactSensitiveText } = require('./gpt-api-failure');
 
 const MAX_CARD_ATTEMPTS = Number(process.env.PAYMENT_MAX_CARD_ATTEMPTS) || 3;
 const MAX_AUTOMATION_ATTEMPTS = MAX_CARD_ATTEMPTS;
+const MAX_BILLING_ERROR_LENGTH = 512;
+const PAYMENT_RESULT_UNKNOWN_MESSAGE = '支付结果检测失败：付款结果待核实，请勿重复充值';
 
+// 兼容旧版调用方；Stripe 换卡只依据本次提交的结构化结果。
 function isPaymentDeclined(errorMsg) {
     if (!errorMsg) return false;
     const declinedKeywords = [
@@ -62,7 +66,7 @@ async function resolveBilledAmountForRecord(page, paymentResult, preTaxAmount, c
  * 执行支付；拒付时在同一会话内换卡重试
  * @param {import('playwright').Page} page - Playwright Page 实例
  * @param {object} options - 支付选项
- * @returns {Promise<{ success: boolean, error?: string, cardLast4?: string, manualIntervention?: boolean, screenshots?: string[] }>}
+ * @returns {Promise<{ success: boolean, error?: string, cardLast4?: string, manualIntervention?: boolean, resultUnknown?: boolean, screenshots?: string[] }>}
  */
 async function executePaymentWithRetry(page, options) {
     const { planType: requestedPlanType, cdkCode, email, onProgress, stripeSessionId } = options || {};
@@ -153,12 +157,13 @@ async function executePaymentWithRetry(page, options) {
                 cardAttempt,
                 holderName: billingHolderName
             });
+            const resultUnknown = paymentResult.resultUnknown === true;
 
             if (paymentResult.holderName) {
                 billingHolderName = paymentResult.holderName;
             }
 
-            if (paymentResult.success) {
+            if (paymentResult.success && !resultUnknown) {
                 const resolved = await resolveBilledAmountForRecord(
                     page,
                     paymentResult,
@@ -196,14 +201,15 @@ async function executePaymentWithRetry(page, options) {
                 return { success: true, cardLast4, holderName, screenshots };
             }
 
-            lastError = paymentResult.error || '支付失败';
+            lastError = resultUnknown
+                ? PAYMENT_RESULT_UNKNOWN_MESSAGE
+                : redactSensitiveText(paymentResult.error, MAX_BILLING_ERROR_LENGTH).toWellFormed() || '支付失败';
             if (paymentResult.screenshot) {
                 screenshots.push(paymentResult.screenshot);
                 progress(`FAILURE_SCREENSHOT: ${paymentResult.screenshot}`);
             }
 
-            const declined = paymentResult.declined || isPaymentDeclined(lastError);
-            if (declined) {
+            if (paymentResult.declined === true && !resultUnknown) {
                 await store.createBillingRecord({
                     card_number: card.card_number,
                     card_last4: cardLast4,
@@ -243,6 +249,8 @@ async function executePaymentWithRetry(page, options) {
             if (paymentResult.captchaRequired) {
                 progress('检测到 Cloudflare/hCaptcha 人机验证，自动化无法可靠通过');
             }
+            // 账单写入失败时，父任务也需要知道已提交且结果未确认。
+            if (resultUnknown) console.log('PAYMENT_RESULT_UNKNOWN');
 
             await store.createBillingRecord({
                 card_number: card.card_number,
@@ -254,16 +262,17 @@ async function executePaymentWithRetry(page, options) {
                 email,
                 stripe_session_id: stripeSessionId || null,
                 status: 'failed',
-                error_code: 'form_validation_failed',
+                error_code: resultUnknown ? 'payment_result_unknown' : 'form_validation_failed',
                 error_message: lastError
             });
 
-            progress('支付自动化失败，需人工操作');
+            progress(resultUnknown ? PAYMENT_RESULT_UNKNOWN_MESSAGE : '支付自动化失败，需人工操作');
             return {
                 success: false,
-                error: `需要人工操作：${lastError}`,
+                error: resultUnknown ? lastError : `需要人工操作：${lastError}`,
                 cardLast4,
                 manualIntervention: true,
+                ...(resultUnknown ? { resultUnknown: true } : {}),
                 screenshots
             };
         } finally {
